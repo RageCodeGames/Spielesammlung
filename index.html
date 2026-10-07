@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#152033">
+  <meta name="description" content="Kajütenspiele – kleine Spiele, auch ohne Internet.">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Kajütenspiele">
+  <title>Kajütenspiele</title>
+  <link rel="icon" href="./icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <link rel="manifest" href="./manifest.json">
+  <link rel="stylesheet" href="./shared/styles.css">
+</head>
+<body>
+  <!-- Sichtbarer Titel kommt aus shared/games.js (APP_NAME). -->
+  <div id="app" class="shell"></div>
+  <noscript>
+    <p class="tagline">Kajütenspiele brauchen JavaScript.</p>
+  </noscript>
+  <script type="module" src="./shared/hub.js"></script>
+</body>
+</html>
