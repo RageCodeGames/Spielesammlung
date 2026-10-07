@@ -30,6 +30,6 @@ export const games = [
     description: "Finde die versteckten Schiffe.",
     emoji: "🚢",
     href: "./games/schiffe/index.html",
-    available: false,
+    available: true,
   },
 ];
