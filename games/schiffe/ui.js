@@ -1,25 +1,38 @@
 import {
+  SHAPES,
   allPlaced,
+  assessFleet,
   beginBattle,
   beginPlacement,
+  commitSunk,
   coord,
   COLS,
   dealRandom,
+  decodeRules,
+  defaultCounts,
+  encodeRules,
   fireIncoming,
+  formatCode,
   freshState,
   isRunning,
   liftAt,
   logText,
   markEnemy,
-  ownShipSunk,
+  MAX_COUNT,
+  MAX_SIZE,
+  MIN_SIZE,
+  mirror,
   ownShotStats,
   placeSelected,
   previewAt,
+  readSave,
   resetShips,
+  rotate,
+  rulesFor,
   selectShip,
+  shapeBox,
   shipAt,
-  SIZE,
-  toggleOrientation,
+  sunkText,
   undo,
 } from "./logic.js";
 import { playTone, unlock } from "../../shared/sound.js";
@@ -28,11 +41,28 @@ import { requestWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
 
 const STORAGE_KEY = "kajuete:schiffe";
+const PRESET_KEY = "kajuete:schiffe-vorlagen";
+
+const MODES = [
+  ["classic", "Klassisch", "10×10 · 5, 4, 3, 3, 2"],
+  ["paper", "Papier", "10×10 · 5, 4, 4, 3, 3, 3, 2, 2, 2, 2"],
+  ["mixed", "Gemischt", "10×10 · gerade 5, L-Form, gerade 3, Winkel, zwei gerade 2"],
+  ["custom", "Custom", "Eigene Feldgröße und Flotte"],
+];
 
 let state = freshState();
+let draft = rulesFor("classic", false);
+let customWidth = 10;
+let customHeight = 10;
+let customCounts = defaultCounts();
 let pendingMenu = null;
+let boardTab = "enemy";
+let tabMode = false;
+let tabLock = false;
+let bootNotice = null;
 let toastTimer = 0;
 let announceTimer = 0;
+let fitToken = 0;
 
 const app = document.getElementById("app");
 
@@ -53,7 +83,7 @@ function toast(message) {
   node.setAttribute("role", "status");
   document.body.append(node);
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => node.remove(), 1400);
+  toastTimer = setTimeout(() => node.remove(), 1600);
 }
 
 function confirmDialog(message, onYes) {
@@ -86,16 +116,20 @@ function playResult(result) {
   }
 }
 
-function showAnnounce(kind, title, sub) {
+function showAnnounce(kind, title, sub, onClose) {
   document.querySelector(".announce")?.remove();
   clearTimeout(announceTimer);
   const overlay = el("div", `announce ${kind}`);
   overlay.setAttribute("role", "status");
   overlay.append(el("strong", "", title));
   if (sub) overlay.append(el("span", "", sub));
+  let closed = false;
   const close = () => {
+    if (closed) return;
+    closed = true;
     clearTimeout(announceTimer);
     overlay.remove();
+    if (onClose) onClose();
   };
   overlay.addEventListener("click", close);
   document.body.append(overlay);
@@ -111,6 +145,29 @@ function backLink() {
   return link;
 }
 
+function codeLine(code) {
+  const line = el("p", "game-code");
+  line.append(document.createTextNode("Spielcode "), el("strong", "", formatCode(code)));
+  return line;
+}
+
+function shapeIcon(shapeId, rotation = 0, mirrored = false, sunk = false) {
+  const box = shapeBox(shapeId, rotation, mirrored);
+  const icon = el("span", sunk ? "shape sunk" : "shape");
+  icon.setAttribute("aria-hidden", "true");
+  icon.style.gridTemplateColumns = `repeat(${box.w}, 7px)`;
+  icon.style.gridTemplateRows = `repeat(${box.h}, 7px)`;
+  const on = new Set(box.cells.map(([x, y]) => `${x},${y}`));
+  for (let y = 0; y < box.h; y += 1) {
+    for (let x = 0; x < box.w; x += 1) icon.append(el("i", on.has(`${x},${y}`) ? "on" : ""));
+  }
+  return icon;
+}
+
+function ownSunk(ship) {
+  return Boolean(ship.cells?.length && ship.cells.every((cell) => state.incoming[cell.r][cell.c]));
+}
+
 function askNewGame() {
   if (state.phase === "place" || state.phase === "battle") {
     confirmDialog("Neues Spiel beginnen? Der laufende Spielstand wird gelöscht.", startFresh);
@@ -121,34 +178,61 @@ function askNewGame() {
 
 function startFresh() {
   pendingMenu = null;
+  boardTab = "enemy";
+  bootNotice = null;
+  draft = rulesFor("classic", false);
+  customWidth = 10;
+  customHeight = 10;
+  customCounts = defaultCounts();
   state = freshState();
   set(STORAGE_KEY, state);
   render();
 }
 
-function miniShip(size, sunk) {
-  const ship = el("span", sunk ? "mini-ship sunk" : "mini-ship");
-  ship.setAttribute("aria-hidden", "true");
-  for (let i = 0; i < size; i += 1) ship.append(el("i"));
-  return ship;
+function rememberCustom(rules) {
+  if (rules.mode !== "custom") return;
+  customWidth = rules.width;
+  customHeight = rules.height;
+  customCounts = { ...rules.counts };
+}
+
+function loadPresets() {
+  const data = get(PRESET_KEY, []);
+  return Array.isArray(data) ? data.filter((item) => item && typeof item.name === "string" && item.rules) : [];
+}
+
+function applyDraft(rules) {
+  draft = {
+    mode: rules.mode,
+    width: rules.width,
+    height: rules.height,
+    allowTouch: !!rules.allowTouch,
+    counts: { ...defaultCounts(), ...rules.counts },
+  };
+  rememberCustom(draft);
 }
 
 function fleetRow(label, ships, own) {
   const row = el("div", own ? "fleet-row own" : "fleet-row");
   row.append(el("span", "fleet-label", label));
   const list = el("span", "mini-ships");
-  for (const ship of ships) list.append(miniShip(ship.size, ship.sunk));
+  for (const ship of ships) list.append(shapeIcon(ship.shapeId, 0, false, ship.sunk));
   row.append(list);
   return row;
+}
+
+function setGridVars() {
+  document.documentElement.style.setProperty("--cols", String(state.width));
+  document.documentElement.style.setProperty("--rows", String(state.height));
 }
 
 function makeGrid(kind) {
   const grid = el("div", "grid");
   grid.append(el("div", "corner"));
-  for (let c = 0; c < SIZE; c += 1) grid.append(el("div", "coord", COLS[c]));
-  for (let r = 0; r < SIZE; r += 1) {
+  for (let c = 0; c < state.width; c += 1) grid.append(el("div", "coord", COLS[c]));
+  for (let r = 0; r < state.height; r += 1) {
     grid.append(el("div", "coord", String(r + 1)));
-    for (let c = 0; c < SIZE; c += 1) {
+    for (let c = 0; c < state.width; c += 1) {
       const button = el("button", "cell");
       button.type = "button";
       button.dataset.c = String(c);
@@ -165,13 +249,11 @@ function cellButton(grid, c, r) {
 }
 
 function paintGrid(grid, kind) {
-  for (let r = 0; r < SIZE; r += 1) {
-    for (let c = 0; c < SIZE; c += 1) {
+  for (let r = 0; r < state.height; r += 1) {
+    for (let c = 0; c < state.width; c += 1) {
       const button = cellButton(grid, c, r);
       button.className = "cell";
-      const label = [
-        `${kind === "enemy" ? "Gegner" : kind === "place" ? "Feld" : "Eigenes Feld"} ${coord(c, r)}`,
-      ];
+      const label = [`${kind === "enemy" ? "Gegner" : kind === "place" ? "Feld" : "Eigenes Feld"} ${coord(c, r)}`];
       if (kind === "place") {
         const ship = shipAt(state.ships, c, r);
         if (ship) {
@@ -185,15 +267,13 @@ function paintGrid(grid, kind) {
         if (mark?.result === "water") {
           button.classList.add("mark-water");
           label.push("Wasser");
-        } else if (mark?.result === "sunk" || (ship && ownShipSunk(ship, state.incoming))) {
+        } else if (mark?.result === "sunk" || (ship && ownSunk(ship))) {
           button.classList.add("mark-sunk");
           label.push("Versenkt");
         } else if (mark?.result === "hit") {
           button.classList.add("mark-hit");
           label.push("Treffer");
-        } else if (ship) {
-          label.push(ship.name);
-        }
+        } else if (ship) label.push(ship.name);
       } else {
         const mark = state.enemy[r][c];
         if (mark?.kind === "water") {
@@ -215,99 +295,308 @@ function paintGrid(grid, kind) {
 }
 
 function paintPreview(grid, c, r) {
-  for (const button of grid.querySelectorAll(".cell")) {
-    button.classList.remove("preview-ok", "preview-bad");
-  }
+  for (const button of grid.querySelectorAll(".cell")) button.classList.remove("preview-ok", "preview-bad");
   const preview = previewAt(state, c, r);
-  const className = preview.issue ? "preview-bad" : "preview-ok";
-  for (const cell of preview.cells) {
-    cellButton(grid, cell.c, cell.r)?.classList.add(className);
-  }
+  if (!preview) return null;
+  const className = preview.ok ? "preview-ok" : "preview-bad";
+  for (const cell of preview.cells) cellButton(grid, cell.c, cell.r)?.classList.add(className);
   return preview;
+}
+
+function wantsTabs() {
+  const availW = Math.min(window.innerWidth, 672) - 8;
+  const availH = window.innerHeight - 210;
+  const cell = Math.min((availW - 16) / state.width, (availH / 2 - 16) / state.height);
+  return cell < 24;
 }
 
 function fitBoards() {
   const battle = document.querySelector(".battle");
   if (!battle) return;
   const status = battle.querySelector(".status");
-  const titles = battle.querySelectorAll(".board-title");
-  let titleH = 0;
-  titles.forEach((title) => {
-    titleH += title.offsetHeight;
+  const tabs = battle.querySelector(".board-tabs");
+  let chrome = (status?.offsetHeight || 0) + (tabs?.offsetHeight || 0) + 8;
+  battle.querySelectorAll(".board-title").forEach((title) => {
+    chrome += title.offsetHeight;
   });
+  const boards = tabMode ? 1 : 2;
   const availW = battle.clientWidth;
-  const availH = battle.clientHeight - status.offsetHeight - titleH - 8;
-  let cell = Math.floor(Math.min((availW - 16) / 10, availH / 2 / 10));
-  let label = Math.max(14, Math.round(cell * 0.72));
-  while (cell > 8 && (cell * 10 + label > availW || cell * 10 + label > availH / 2)) {
+  const availH = battle.clientHeight - chrome;
+  let cell = Math.floor(Math.min((availW - 4) / state.width, availH / boards / state.height));
+  let label = Math.max(12, Math.round(cell * 0.62));
+  const fits = (size, labelSize) => size * state.width + labelSize <= availW && size * state.height + labelSize <= availH / boards;
+  while (cell > 8 && !fits(cell, label)) {
     cell -= 1;
-    label = Math.max(14, Math.round(cell * 0.72));
+    label = Math.max(12, Math.round(cell * 0.62));
   }
   document.documentElement.style.setProperty("--cell", `${Math.max(8, cell)}px`);
   document.documentElement.style.setProperty("--label", `${label}px`);
+  setGridVars();
+}
+
+function fitPlace(view) {
+  setGridVars();
+  const width = view.clientWidth - 8;
+  const cell = Math.max(16, Math.min(46, Math.floor((width - 22) / state.width)));
+  document.documentElement.style.setProperty("--cell", `${cell}px`);
+  document.documentElement.style.setProperty("--label", "22px");
+}
+
+function scheduleFit(note, button) {
+  const token = ++fitToken;
+  const rules = draft;
+  note.textContent = "Prüfe, ob die Flotte passt …";
+  note.className = "note";
+  button.disabled = true;
+  setTimeout(() => {
+    if (token !== fitToken) return;
+    const result = assessFleet(rules);
+    if (token !== fitToken) return;
+    button.disabled = !result.ok;
+    note.textContent = result.message || result.warning || "Die Flotte passt.";
+    note.classList.toggle("is-bad", !result.ok);
+    note.classList.toggle("is-warn", Boolean(result.ok && result.warning));
+  }, 30);
+}
+
+function askCode() {
+  const back = el("div", "dialog-back");
+  const dialog = el("div", "dialog");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.append(el("p", "", "Code eingeben"));
+  const input = document.createElement("input");
+  input.className = "text-input";
+  input.type = "text";
+  input.maxLength = 32;
+  input.autocapitalize = "characters";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.enterKeyHint = "done";
+  input.setAttribute("aria-label", "Spielcode");
+  const error = el("p", "note is-bad");
+  error.hidden = true;
+  const ok = el("button", "btn primary", "Übernehmen");
+  ok.type = "button";
+  const no = el("button", "btn", "Abbrechen");
+  no.type = "button";
+  const submit = () => {
+    const decoded = decodeRules(input.value);
+    if (decoded.error) {
+      error.hidden = false;
+      error.textContent = decoded.error;
+      return;
+    }
+    applyDraft(decoded.rules);
+    back.remove();
+    render();
+  };
+  ok.addEventListener("click", submit);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submit();
+  });
+  no.addEventListener("click", () => back.remove());
+  dialog.append(input, error, ok, no);
+  back.append(dialog);
+  document.body.append(back);
+  input.focus();
+}
+
+function askWhichShip(choice) {
+  const back = el("div", "dialog-back");
+  const dialog = el("div", "dialog");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.append(el("h2", "", "Welches Schiff wurde versenkt?"));
+  const list = el("div", "stack");
+  for (const option of choice.options) {
+    const button = el("button", "choice pick");
+    button.type = "button";
+    button.append(shapeIcon(option.shapeId), el("span", "", `${option.name} · ${option.size}`));
+    button.addEventListener("click", () => {
+      const result = commitSunk(state, choice.c, choice.r, option.index);
+      back.remove();
+      if (result.error) {
+        toast(result.error);
+        return;
+      }
+      state = result.state;
+      save();
+      render();
+    });
+    list.append(button);
+  }
+  const cancel = el("button", "btn", "Abbrechen");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => back.remove());
+  dialog.append(list, cancel);
+  back.append(dialog);
+  document.body.append(back);
 }
 
 function renderSettings() {
   document.body.classList.remove("is-battle");
-  let fleetId = state.fleetId || "classic";
-  let allowTouch = state.allowTouch;
   const view = el("section", "setup");
   view.append(backLink());
   view.append(el("h1", "", "Schiffe versenken"));
   view.append(el("p", "lead", "Jeder spielt auf dem eigenen Handy. Die Schüsse ruft ihr euch zu."));
+  if (bootNotice) view.append(el("p", "note is-warn", bootNotice));
 
-  const classic = el("button", "choice", "");
-  classic.type = "button";
-  classic.append(el("strong", "", "Klassisch"), el("small", "", "5, 4, 3, 3, 2"));
-  const paper = el("button", "choice", "");
-  paper.type = "button";
-  paper.append(el("strong", "", "Papier"), el("small", "", "5, 4, 4, 3, 3, 3, 2, 2, 2, 2"));
-
-  const touch = el("button", "switch-row");
-  touch.type = "button";
-  touch.setAttribute("role", "switch");
-  const touchTitle = el("strong", "", "Schiffe dürfen sich berühren");
-  const touchHelp = el("small");
-  touch.append(touchTitle, touchHelp);
-
-  function paintChoices() {
-    classic.classList.toggle("is-on", fleetId === "classic");
-    paper.classList.toggle("is-on", fleetId === "paper");
-    classic.setAttribute("aria-pressed", fleetId === "classic" ? "true" : "false");
-    paper.setAttribute("aria-pressed", fleetId === "paper" ? "true" : "false");
-    touch.classList.toggle("is-on", allowTouch);
-    touch.setAttribute("aria-checked", allowTouch ? "true" : "false");
-    touchHelp.textContent = allowTouch
-      ? "An: Schiffe dürfen Kante an Kante und diagonal liegen."
-      : "Aus: Schiffe brauchen Abstand, auch diagonal.";
+  const choices = el("div", "choices");
+  for (const [id, title, detail] of MODES) {
+    const button = el("button", draft.mode === id ? "choice is-on" : "choice");
+    button.type = "button";
+    button.setAttribute("aria-pressed", draft.mode === id ? "true" : "false");
+    button.append(el("strong", "", title), el("small", "", detail));
+    button.addEventListener("click", () => {
+      if (id === "custom") draft = rulesFor("custom", draft.allowTouch, { width: customWidth, height: customHeight, counts: customCounts });
+      else draft = rulesFor(id, draft.allowTouch);
+      render();
+    });
+    choices.append(button);
   }
 
-  classic.addEventListener("click", () => {
-    fleetId = "classic";
-    paintChoices();
-  });
-  paper.addEventListener("click", () => {
-    fleetId = "paper";
-    paintChoices();
-  });
+  const touch = el("button", draft.allowTouch ? "switch-row is-on" : "switch-row");
+  touch.type = "button";
+  touch.setAttribute("role", "switch");
+  touch.setAttribute("aria-checked", draft.allowTouch ? "true" : "false");
+  touch.append(
+    el("strong", "", "Schiffe dürfen sich berühren"),
+    el("small", "", draft.allowTouch
+      ? "An: Schiffe dürfen Kante an Kante und diagonal liegen."
+      : "Aus: Schiffe brauchen Abstand, auch diagonal.")
+  );
   touch.addEventListener("click", () => {
-    allowTouch = !allowTouch;
-    paintChoices();
-  });
-  paintChoices();
-
-  const next = el("button", "btn primary", "Weiter");
-  next.type = "button";
-  next.addEventListener("click", () => {
-    state = beginPlacement(state, fleetId, allowTouch);
-    save();
+    draft = { ...draft, allowTouch: !draft.allowTouch, counts: { ...draft.counts } };
     render();
   });
 
-  const choices = el("div", "choices");
-  choices.append(classic, paper);
-  view.append(choices, touch, next);
+  view.append(choices, touch, codeLine(encodeRules(draft)));
+  const codeButton = el("button", "btn", "Code eingeben");
+  codeButton.type = "button";
+  codeButton.addEventListener("click", askCode);
+  view.append(codeButton);
+
+  if (draft.mode !== "custom") {
+    const preview = el("div", "mini-ships");
+    for (const shape of SHAPES) {
+      for (let i = 0; i < (draft.counts[shape.id] || 0); i += 1) preview.append(shapeIcon(shape.id));
+    }
+    view.append(preview);
+  } else {
+    const sizes = el("div", "stack");
+    sizes.append(sizeStepper("Breite", draft.width, (value) => {
+      customWidth = value;
+      draft = rulesFor("custom", draft.allowTouch, { width: customWidth, height: customHeight, counts: customCounts });
+      render();
+    }, (value) => `${value} · A–${COLS[value - 1]}`));
+    sizes.append(sizeStepper("Höhe", draft.height, (value) => {
+      customHeight = value;
+      draft = rulesFor("custom", draft.allowTouch, { width: customWidth, height: customHeight, counts: customCounts });
+      render();
+    }, (value) => `${value} · 1–${value}`));
+    view.append(sizes);
+
+    view.append(el("h2", "group-label", "Gerade"));
+    for (const shape of SHAPES.filter((item) => item.form === "gerade")) view.append(counter(shape));
+    view.append(el("h2", "group-label", "Gewinkelt"));
+    for (const shape of SHAPES.filter((item) => item.form !== "gerade")) view.append(counter(shape));
+
+    const presetBox = el("div", "stack");
+    presetBox.append(el("h2", "group-label", "Eigene Einstellungen"));
+    const name = document.createElement("input");
+    name.className = "text-input";
+    name.type = "text";
+    name.maxLength = 24;
+    name.placeholder = "Name";
+    name.setAttribute("aria-label", "Name der Vorlage");
+    const savePreset = el("button", "btn", "Speichern");
+    savePreset.type = "button";
+    savePreset.addEventListener("click", () => {
+      const title = name.value.trim();
+      if (!title) {
+        toast("Bitte einen Namen eingeben.");
+        return;
+      }
+      const next = loadPresets().filter((item) => item.name !== title);
+      next.unshift({ name: title, rules: draft });
+      set(PRESET_KEY, next.slice(0, 20));
+      toast("Gespeichert.");
+      render();
+    });
+    presetBox.append(name, savePreset);
+    for (const preset of loadPresets()) {
+      const row = el("div", "preset");
+      const load = el("button", "btn", preset.name);
+      load.type = "button";
+      load.addEventListener("click", () => {
+        applyDraft(preset.rules);
+        render();
+      });
+      const remove = el("button", "btn", "Löschen");
+      remove.type = "button";
+      remove.addEventListener("click", () => {
+        set(PRESET_KEY, loadPresets().filter((item) => item.name !== preset.name));
+        render();
+      });
+      row.append(load, remove);
+      presetBox.append(row);
+    }
+    view.append(presetBox);
+  }
+
+  const note = el("p", "note", "Prüfe, ob die Flotte passt …");
+  const next = el("button", "btn primary", "Weiter");
+  next.type = "button";
+  next.disabled = true;
+  next.addEventListener("click", () => {
+    if (next.disabled) return;
+    boardTab = "enemy";
+    state = beginPlacement(draft);
+    save();
+    render();
+  });
+  view.append(note, next);
   app.replaceChildren(view);
+  scheduleFit(note, next);
+}
+
+function sizeStepper(label, value, onChange, text) {
+  const row = el("div", "stepper");
+  const minus = el("button", "btn", "−");
+  minus.type = "button";
+  minus.disabled = value <= MIN_SIZE;
+  minus.setAttribute("aria-label", `${label} verkleinern`);
+  minus.addEventListener("click", () => onChange(value - 1));
+  const plus = el("button", "btn", "+");
+  plus.type = "button";
+  plus.disabled = value >= MAX_SIZE;
+  plus.setAttribute("aria-label", `${label} vergrößern`);
+  plus.addEventListener("click", () => onChange(value + 1));
+  row.append(minus, el("span", "", `${label} ${text(value)}`), plus);
+  return row;
+}
+
+function counter(shape) {
+  const count = draft.counts[shape.id] || 0;
+  const row = el("div", "counter");
+  const minus = el("button", "btn", "−");
+  minus.type = "button";
+  minus.disabled = count <= 0;
+  minus.setAttribute("aria-label", `${shape.name} weniger`);
+  const plus = el("button", "btn", "+");
+  plus.type = "button";
+  plus.disabled = count >= MAX_COUNT;
+  plus.setAttribute("aria-label", `${shape.name} mehr`);
+  const change = (next) => {
+    customCounts = { ...customCounts, [shape.id]: next };
+    draft = rulesFor("custom", draft.allowTouch, { width: customWidth, height: customHeight, counts: customCounts });
+    render();
+  };
+  minus.addEventListener("click", () => change(count - 1));
+  plus.addEventListener("click", () => change(count + 1));
+  row.append(shapeIcon(shape.id), el("span", "counter-name", shape.name), minus, el("span", "counter-value", String(count)), plus);
+  return row;
 }
 
 function renderPlace() {
@@ -321,12 +610,12 @@ function renderPlace() {
   bar.append(el("span", "spacer"), fresh);
   view.append(bar);
   view.append(el("h1", "", "Schiffe legen"));
+  view.append(codeLine(state.code));
 
   const grid = makeGrid("place");
   view.append(grid);
 
   let pointer = null;
-
   grid.addEventListener("pointerdown", (event) => {
     const button = event.target.closest(".cell");
     if (!button || event.button !== 0) return;
@@ -337,7 +626,6 @@ function renderPlace() {
     pointer = { id: event.pointerId, c, r, lift };
     if (!lift) paintPreview(grid, c, r);
   });
-
   grid.addEventListener("pointerup", (event) => {
     if (!pointer || pointer.id !== event.pointerId) return;
     const action = pointer;
@@ -357,35 +645,41 @@ function renderPlace() {
       toast("Zuerst ein Schiff wählen");
       return;
     }
-    const result = placeSelected(state, action.c, action.r);
-    if (result.issue) {
-      for (const cell of result.cells) cellButton(grid, cell.c, cell.r)?.classList.add("preview-bad");
-      const reason =
-        result.issue === "rand"
-          ? "Ragt über den Rand"
-          : result.issue === "ueberlapp"
-            ? "Liegt auf einem Schiff"
-            : "Berührt ein anderes Schiff";
+    const next = placeSelected(state, action.c, action.r);
+    if (next === state) {
+      const preview = previewAt(state, action.c, action.r);
+      const reason = !preview || preview.issue === "rand"
+        ? "Ragt über den Rand"
+        : preview.issue === "ueber"
+          ? "Liegt auf einem Schiff"
+          : "Berührt ein anderes Schiff";
       toast(reason);
-      setTimeout(() => {
-        for (const cell of grid.querySelectorAll(".preview-bad")) cell.classList.remove("preview-bad");
-      }, 450);
+      if (preview) {
+        for (const cell of preview.cells) cellButton(grid, cell.c, cell.r)?.classList.add("preview-bad");
+        setTimeout(() => {
+          for (const cell of grid.querySelectorAll(".preview-bad")) cell.classList.remove("preview-bad");
+        }, 450);
+      }
       return;
     }
-    state = result.state;
+    state = next;
     save();
     render();
   });
 
   const tools = el("div", "btn-row place-tools");
-  const turn = el(
-    "button",
-    "btn",
-    state.orientation === "h" ? "Drehen · waagerecht" : "Drehen · senkrecht"
-  );
+  const turn = el("button", "btn", "Drehen");
   turn.type = "button";
   turn.addEventListener("click", () => {
-    state = toggleOrientation(state);
+    state = rotate(state);
+    save();
+    render();
+  });
+  const flip = el("button", "btn", state.mirror ? "Spiegeln · an" : "Spiegeln");
+  flip.type = "button";
+  flip.setAttribute("aria-pressed", state.mirror ? "true" : "false");
+  flip.addEventListener("click", () => {
+    state = mirror(state);
     save();
     render();
   });
@@ -393,11 +687,11 @@ function renderPlace() {
   random.type = "button";
   random.addEventListener("click", () => {
     const dealt = dealRandom(state);
-    if (!dealt.ok) {
+    if (!dealt) {
       toast("Kein Platz gefunden, bitte noch einmal");
       return;
     }
-    state = dealt.state;
+    state = dealt;
     save();
     render();
   });
@@ -408,16 +702,20 @@ function renderPlace() {
     save();
     render();
   });
-  tools.append(turn, random, reset);
+  tools.append(turn, flip, random, reset);
 
   const dock = el("div", "dock");
   const open = state.ships.filter((ship) => !ship.cells);
   if (open.length === 0) dock.append(el("p", "lead", "Alle Schiffe stehen."));
   for (const ship of open) {
-    const chip = el("button", ship.id === state.selectedId ? "ship-chip is-on" : "ship-chip");
+    const selected = ship.id === state.selectedId;
+    const chip = el("button", selected ? "ship-chip is-on" : "ship-chip");
     chip.type = "button";
-    chip.setAttribute("aria-pressed", ship.id === state.selectedId ? "true" : "false");
-    chip.append(miniShip(ship.size, false), el("span", "", `${ship.name} · ${ship.size}`));
+    chip.setAttribute("aria-pressed", selected ? "true" : "false");
+    chip.append(
+      shapeIcon(ship.shapeId, selected ? state.rotation : 0, selected ? state.mirror : false),
+      el("span", "", `${ship.name} · ${ship.size}`)
+    );
     chip.addEventListener("click", () => {
       state = selectShip(state, ship.id);
       save();
@@ -432,22 +730,19 @@ function renderPlace() {
   done.addEventListener("click", () => {
     if (!allPlaced(state.ships)) return;
     state = beginBattle(state);
+    boardTab = "enemy";
     save();
     render();
   });
 
   view.append(tools, dock, done);
   app.replaceChildren(view);
-  document.documentElement.style.setProperty("--cell", "34px");
-  document.documentElement.style.setProperty("--label", "22px");
-  const width = view.clientWidth - 8;
-  const cell = Math.max(16, Math.min(46, Math.floor((width - 22) / 10)));
-  document.documentElement.style.setProperty("--cell", `${cell}px`);
-  document.documentElement.style.setProperty("--label", "22px");
+  fitPlace(view);
 }
 
 function renderBattle() {
   document.body.classList.add("is-battle");
+  tabMode = tabLock || wantsTabs();
   const bar = el("div", "battle-bar");
   bar.append(backLink());
   const undoButton = el("button", "btn", "Rückgängig");
@@ -465,6 +760,28 @@ function renderBattle() {
   bar.append(el("span", "spacer"), undoButton, fresh);
 
   const battle = el("div", "battle");
+  if (tabMode) {
+    const tabs = el("div", "board-tabs");
+    for (const [id, label] of [["enemy", "Gegner"], ["own", "Ich"]]) {
+      const button = el("button", boardTab === id ? "is-on" : "", label);
+      button.type = "button";
+      button.setAttribute("aria-pressed", boardTab === id ? "true" : "false");
+      button.addEventListener("click", () => {
+        boardTab = id;
+        pendingMenu = null;
+        render();
+      });
+      tabs.append(button);
+    }
+    battle.append(tabs);
+  }
+
+  const status = el("div", "status");
+  status.append(
+    fleetRow("Gegner", state.enemyFleet.map((slot) => ({ shapeId: slot.shapeId, sunk: slot.sunk })), false),
+    fleetRow("Ich", state.ships.map((ship) => ({ shapeId: ship.shapeId, sunk: ownSunk(ship) })), true)
+  );
+
   const enemyBlock = el("div", "board-block");
   enemyBlock.append(el("p", "board-title", "Gegnerisches Feld"));
   const enemyGrid = makeGrid("enemy");
@@ -476,20 +793,6 @@ function renderBattle() {
   });
   enemyBlock.append(enemyGrid);
 
-  const status = el("div", "status");
-  status.append(
-    fleetRow(
-      "Gegner",
-      state.enemyFleet.map((slot) => ({ size: slot.size, sunk: slot.sunk })),
-      false
-    ),
-    fleetRow(
-      "Ich",
-      state.ships.map((ship) => ({ size: ship.size, sunk: ownShipSunk(ship, state.incoming) })),
-      true
-    )
-  );
-
   const ownBlock = el("div", "board-block");
   ownBlock.append(el("p", "board-title", "Mein Feld"));
   const ownGrid = makeGrid("own");
@@ -498,37 +801,43 @@ function renderBattle() {
     if (!button) return;
     const c = Number(button.dataset.c);
     const r = Number(button.dataset.r);
-    const result = fireIncoming(state, c, r);
-    if (result.already) {
+    const fired = fireIncoming(state, c, r);
+    if (fired.result === "already") {
       toast("Schon beschossen");
       return;
     }
-    state = result.state;
+    if (fired.result === "ignore") return;
+    state = fired.state;
     pendingMenu = null;
     save();
-    await unlock();
-    playResult(result.result);
-    const title = result.result === "water" ? "WASSER" : result.result === "hit" ? "TREFFER!" : "VERSENKT!";
-    const sub = result.result === "sunk" ? `(${result.ship.name}, ${result.ship.size})` : "";
+    const ended = state.phase === "end";
+    if (!ended && tabMode) boardTab = "own";
+    const title = fired.result === "water" ? "WASSER" : fired.result === "hit" ? "TREFFER!" : "VERSENKT!";
+    const sub = fired.result === "sunk" ? sunkText(fired.ship) : "";
     render();
-    showAnnounce(result.result, title, sub);
+    showAnnounce(fired.result, title, sub, () => {
+      if (!ended && tabMode && state.phase === "battle") {
+        boardTab = "enemy";
+        render();
+      }
+    });
+    await unlock();
+    playResult(fired.result);
   });
   ownBlock.append(ownGrid);
-  battle.append(enemyBlock, status, ownBlock);
-  app.replaceChildren(bar, battle);
 
-  if (pendingMenu) {
+  if (tabMode) battle.append(status, boardTab === "own" ? ownBlock : enemyBlock);
+  else battle.append(enemyBlock, status, ownBlock);
+
+  const code = codeLine(state.code);
+  app.replaceChildren(bar, code, battle);
+
+  if (pendingMenu && (!tabMode || boardTab === "enemy")) {
     const menu = el("div", "mark-menu");
     menu.setAttribute("role", "dialog");
     menu.setAttribute("aria-label", "Schuss eintragen");
     menu.append(el("p", "", coord(pendingMenu.c, pendingMenu.r)));
-    const actions = [
-      ["water", "Wasser"],
-      ["hit", "Treffer"],
-      ["sunk", "Versenkt"],
-      ["cancel", "Abbrechen"],
-    ];
-    for (const [kind, label] of actions) {
+    for (const [kind, label] of [["water", "Wasser"], ["hit", "Treffer"], ["sunk", "Versenkt"], ["cancel", "Abbrechen"]]) {
       const button = el("button", "", label);
       button.type = "button";
       button.addEventListener("click", () => {
@@ -542,8 +851,13 @@ function renderBattle() {
           toast(marked.error);
           return;
         }
-        state = marked.state;
         pendingMenu = null;
+        if (marked.choice) {
+          render();
+          askWhichShip(marked.choice);
+          return;
+        }
+        state = marked.state;
         save();
         render();
       });
@@ -553,7 +867,15 @@ function renderBattle() {
   }
 
   requestAnimationFrame(() => {
+    if (!document.body.classList.contains("is-battle")) return;
     fitBoards();
+    const cell = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--cell"));
+    if (!tabMode && cell < 24) {
+      tabLock = true;
+      boardTab = "enemy";
+      render();
+      return;
+    }
     requestAnimationFrame(fitBoards);
   });
 }
@@ -562,11 +884,10 @@ function renderEnd() {
   document.body.classList.remove("is-battle");
   const view = el("section", "end-screen");
   view.append(backLink());
+  view.append(codeLine(state.code));
   view.append(el("h1", "", state.outcome === "won" ? "Gewonnen" : "Verloren"));
-  const stats = ownShotStats(state.enemy);
-  view.append(
-    el("p", "lead", `${stats.shots} eigene Schüsse · Trefferquote ${stats.rate} %`)
-  );
+  const stats = ownShotStats(state);
+  view.append(el("p", "lead", `${stats.shots} eigene Schüsse · Trefferquote ${stats.rate} %`));
   view.append(el("h2", "", "Mein Feld"));
   const grid = makeGrid("reveal");
   grid.classList.add("end-grid");
@@ -575,7 +896,7 @@ function renderEnd() {
   view.append(el("h2", "", "Schüsse des Gegners"));
   const list = el("ol", "log");
   if (state.shotLog.length === 0) list.append(el("li", "", "Keine Schüsse"));
-  state.shotLog.forEach((entry, index) => list.append(el("li", "", logText(entry, index))));
+  for (const entry of state.shotLog) list.append(el("li", "", logText(entry)));
   view.append(list);
   const fresh = el("button", "btn primary", "Neues Spiel");
   fresh.type = "button";
@@ -586,6 +907,11 @@ function renderEnd() {
   row.append(fresh, hub);
   view.append(row);
   app.replaceChildren(view);
+  const cell = Math.max(12, Math.min(28, Math.floor((view.clientWidth - 48) / state.width)));
+  grid.style.setProperty("--cell", `${cell}px`);
+  grid.style.setProperty("--label", "18px");
+  grid.style.setProperty("--cols", String(state.width));
+  grid.style.setProperty("--rows", String(state.height));
 }
 
 let showingResume = false;
@@ -596,7 +922,7 @@ function draw() {
     renderResumeScreen();
     return;
   }
-  if (state.phase === "settings") renderSettings();
+  if (state.phase === "setup") renderSettings();
   else if (state.phase === "place") renderPlace();
   else if (state.phase === "battle") renderBattle();
   else renderEnd();
@@ -613,6 +939,7 @@ function renderResumeScreen() {
   view.append(backLink());
   view.append(el("h1", "", "Schiffe versenken"));
   view.append(el("p", "lead", "Es gibt ein angefangenes Spiel auf diesem Handy."));
+  if (state.code) view.append(codeLine(state.code));
   const resume = el("button", "btn primary", "Spiel fortsetzen");
   resume.type = "button";
   resume.addEventListener("click", () => {
@@ -632,18 +959,37 @@ function boot() {
   document.title = "Schiffe versenken – Kajütenspiele";
   requestWakeLock();
   initUpdates();
-  const saved = get(STORAGE_KEY, null);
-  if (isRunning(saved)) {
-    state = saved;
-    showingResume = true;
-  } else {
-    state = freshState();
-  }
+  const loaded = readSave(get(STORAGE_KEY, null));
+  state = loaded.state;
+  bootNotice = loaded.notice;
+  if (loaded.notice) set(STORAGE_KEY, freshState());
+  if (isRunning(state)) showingResume = true;
   draw();
 }
 
-window.addEventListener("resize", fitBoards);
-if (window.visualViewport) window.visualViewport.addEventListener("resize", fitBoards);
+window.addEventListener("resize", () => {
+  if (state.phase === "battle" && !showingResume) {
+    tabLock = false;
+    const next = wantsTabs();
+    if (next !== tabMode) {
+      tabMode = next;
+      if (!next) boardTab = "enemy";
+      render();
+      return;
+    }
+    fitBoards();
+    return;
+  }
+  if (state.phase === "place" && !showingResume) {
+    const view = document.querySelector(".place");
+    if (view) fitPlace(view);
+  }
+});
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => {
+    if (state.phase === "battle" && !showingResume) fitBoards();
+  });
+}
 window.addEventListener("pagehide", save);
 
 boot();

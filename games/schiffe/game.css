@@ -17,6 +17,16 @@ body.schiffe.is-battle #app {
   margin-inline: auto;
 }
 
+body.schiffe:not(.is-battle) {
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+
+body.schiffe:not(.is-battle) #app {
+  overflow: auto;
+}
+
 .setup,
 .end-screen {
   width: min(100%, 34rem);
@@ -147,7 +157,7 @@ body.schiffe.is-battle #app {
 .place-tools,
 .dock,
 .place .btn.primary {
-  width: min(100%, calc(var(--label) + 10 * var(--cell)));
+  width: min(100%, calc(var(--label) + var(--cols, 10) * var(--cell)));
 }
 
 .dock {
@@ -209,8 +219,8 @@ body.schiffe.is-battle #app {
 
 .grid {
   display: grid;
-  grid-template-columns: var(--label) repeat(10, var(--cell));
-  grid-template-rows: var(--label) repeat(10, var(--cell));
+  grid-template-columns: var(--label) repeat(var(--cols, 10), var(--cell));
+  grid-template-rows: var(--label) repeat(var(--rows, 10), var(--cell));
   touch-action: manipulation;
 }
 
@@ -312,7 +322,7 @@ body.schiffe.is-battle #app {
 }
 
 .status {
-  width: min(100%, calc(var(--label) + 10 * var(--cell)));
+  width: min(100%, calc(var(--label) + var(--cols, 10) * var(--cell)));
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -490,6 +500,157 @@ body.schiffe.is-battle #app {
   border-radius: 0.8rem;
   background: var(--surface);
   font-variant-numeric: tabular-nums;
+}
+
+.group-label {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.game-code {
+  margin: 0;
+  text-align: center;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.game-code strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.note {
+  margin: 0;
+  padding: 0.7rem 0.9rem;
+  border-radius: 0.8rem;
+  background: #243044;
+}
+
+.note.is-bad {
+  background: #5c2e2e;
+}
+
+.note.is-warn {
+  background: #5a4320;
+}
+
+.text-input {
+  width: 100%;
+  min-height: 48px;
+  border: 0;
+  border-radius: 0.8rem;
+  padding: 0.55rem 0.8rem;
+  background: #101826;
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.stepper,
+.counter,
+.preset {
+  display: grid;
+  grid-template-columns: 48px 1fr 48px;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 48px;
+}
+
+.counter {
+  grid-template-columns: auto 1fr 48px auto 48px;
+}
+
+.preset {
+  grid-template-columns: 1fr auto;
+}
+
+.stepper .btn,
+.counter .btn,
+.preset .btn {
+  min-height: 48px;
+  padding-inline: 0.4rem;
+}
+
+.counter-name {
+  min-width: 0;
+}
+
+.counter-value {
+  width: 1.4rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.shape {
+  display: inline-grid;
+  gap: 1px;
+  flex: 0 0 auto;
+}
+
+.shape i {
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+}
+
+.shape i.on {
+  background: var(--accent);
+}
+
+.fleet-row.own .shape i.on {
+  background: #6db892;
+}
+
+.shape.sunk {
+  position: relative;
+}
+
+.shape.sunk i.on {
+  background: #667488;
+}
+
+.shape.sunk::after {
+  content: "";
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  top: 50%;
+  height: 2px;
+  background: #f4efe6;
+  transform: rotate(-16deg);
+}
+
+.choice.pick {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.board-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  width: min(100%, calc(var(--label) + var(--cols, 10) * var(--cell)));
+}
+
+.board-tabs button {
+  min-height: 48px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.board-tabs button.is-on {
+  background: var(--accent);
+  color: var(--accent-ink);
 }
 
 @media (prefers-reduced-motion: reduce) {
