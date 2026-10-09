@@ -11,6 +11,7 @@ export const ROUND_OPTIONS = [5, 10, 15];
 export const BOMB_OPTIONS = [3, 5];
 export const MIN_PLAYERS = 2;
 export const MAX_PLAYERS = 8;
+export const FREE_LABEL = "Freie Kategorie";
 
 export function defaultLetters() {
   const letters = {};
@@ -27,6 +28,7 @@ export function defaultSettings() {
     bombLimit: 5,
     letters: defaultLetters(),
     tick: true,
+    categoryMode: "list",
   };
 }
 
@@ -38,13 +40,29 @@ export function normalizeSettings(raw) {
   const endMode = scoring === "survive" ? "rounds" : raw.endMode === "bombs" ? "bombs" : "rounds";
   const rounds = ROUND_OPTIONS.includes(raw.rounds) ? raw.rounds : 10;
   const bombLimit = BOMB_OPTIONS.includes(raw.bombLimit) ? raw.bombLimit : 5;
+  const categoryMode = raw.categoryMode === "free" ? "free" : "list";
   const letters = defaultLetters();
   if (raw.letters && typeof raw.letters === "object") {
     for (const letter of ABC) {
       if (typeof raw.letters[letter] === "boolean") letters[letter] = raw.letters[letter];
     }
   }
-  return { timer, scoring, endMode, rounds, bombLimit, letters, tick: raw.tick !== false };
+  return { timer, scoring, endMode, rounds, bombLimit, letters, tick: raw.tick !== false, categoryMode };
+}
+
+export function isFreeMode(settings) {
+  return settings?.categoryMode === "free";
+}
+
+export function displayCategory(state) {
+  const text = String(state?.category || "").trim();
+  if (isFreeMode(state?.settings)) return text || FREE_LABEL;
+  return text || FREE_LABEL;
+}
+
+export function normalizeFreeCategory(text) {
+  const name = String(text || "").trim();
+  return name || FREE_LABEL;
 }
 
 export function enabledLetters(settings) {
@@ -72,8 +90,9 @@ export function movePlayer(names, index, dir) {
 export function freshState(players, settings, categories, rng = Math.random) {
   const list = makePlayers(players.map((item) => (typeof item === "string" ? item : item.name)));
   const rules = normalizeSettings(settings);
+  const free = isFreeMode(rules);
   const pool = uniqueCategories(categories);
-  const category = drawCategory(pool, [], rng);
+  const category = free ? FREE_LABEL : drawCategory(pool, [], rng);
   return {
     version: 1,
     phase: "play",
@@ -82,27 +101,44 @@ export function freshState(players, settings, categories, rng = Math.random) {
     round: 1,
     settings: rules,
     category,
-    usedCategories: category ? [category] : [],
+    usedCategories: free || !category ? [] : [category],
     locked: [],
     started: false,
     paused: false,
     deadline: null,
     burst: null,
+    needCategory: false,
+  };
+}
+
+export function migrateState(data) {
+  if (!data || typeof data !== "object") return data;
+  const settings = normalizeSettings(data.settings);
+  return {
+    ...data,
+    settings,
+    needCategory: !!data.needCategory,
+    category: data.category == null ? (isFreeMode(settings) ? FREE_LABEL : data.category) : data.category,
   };
 }
 
 export function isRunning(data) {
-  if (!data || data.version !== 1) return false;
-  if (!["play", "boom", "end"].includes(data.phase)) return false;
-  if (!Array.isArray(data.players) || data.players.length < MIN_PLAYERS || data.players.length > MAX_PLAYERS) return false;
-  if (!data.settings || !data.players.every((player) => player && typeof player.name === "string")) return false;
+  const state = migrateState(data);
+  if (!state || state.version !== 1) return false;
+  if (!["play", "boom", "end"].includes(state.phase)) return false;
+  if (!Array.isArray(state.players) || state.players.length < MIN_PLAYERS || state.players.length > MAX_PLAYERS) return false;
+  if (!state.settings || !state.players.every((player) => player && typeof player.name === "string")) return false;
   return true;
 }
 
 export function readSave(data) {
   try {
     if (isRunning(data)) {
-      const state = data.phase === "play" && data.started && !data.paused ? pause(data) : data;
+      const migrated = migrateState(data);
+      const state =
+        migrated.phase === "play" && migrated.started && !migrated.paused && !migrated.needCategory
+          ? pause(migrated)
+          : migrated;
       return { state, notice: null };
     }
     if (data && typeof data === "object" && (data.version || data.phase || data.players)) {
@@ -135,11 +171,32 @@ export function drawCategory(pool, used, rng = Math.random) {
 }
 
 export function otherCategory(state, pool, rng = Math.random) {
-  if (state.started || state.phase !== "play") return state;
+  if (state.started || state.phase !== "play" || isFreeMode(state.settings)) return state;
   const avoid = pool.filter((item) => item !== state.category);
   const category = drawCategory(avoid.length ? avoid : pool, state.usedCategories, rng);
   const used = state.usedCategories.includes(category) ? state.usedCategories : [...state.usedCategories, category];
   return { ...state, category, usedCategories: used };
+}
+
+export function setFreeCategory(state, text) {
+  if (state.phase !== "play" || !isFreeMode(state.settings)) return state;
+  if (state.started && !state.needCategory) return state;
+  return { ...state, category: normalizeFreeCategory(text) };
+}
+
+export function continueFreeCategory(state, text, now = Date.now(), rng = Math.random) {
+  if (state.phase !== "play" || !isFreeMode(state.settings) || !state.needCategory) return state;
+  return startTurn(
+    {
+      ...state,
+      category: normalizeFreeCategory(text),
+      locked: [],
+      needCategory: false,
+      paused: false,
+    },
+    now,
+    rng
+  );
 }
 
 export function randomTurnMs(timerId, rng = Math.random) {
@@ -149,46 +206,62 @@ export function randomTurnMs(timerId, rng = Math.random) {
 }
 
 export function startTurn(state, now = Date.now(), rng = Math.random) {
-  if (state.phase !== "play") return state;
+  if (state.phase !== "play" || state.needCategory) return state;
   const ms = randomTurnMs(state.settings.timer, rng);
-  return { ...state, started: true, paused: false, deadline: now + ms };
+  return { ...state, started: true, paused: false, needCategory: false, deadline: now + ms };
 }
 
 export function pause(state) {
-  if (state.phase !== "play" || !state.started || state.paused) return state;
+  if (state.phase !== "play" || !state.started || state.paused || state.needCategory) return state;
   return { ...state, paused: true, deadline: null };
 }
 
 export function resumeTurn(state, now = Date.now(), rng = Math.random) {
-  if (state.phase !== "play" || !state.paused) return state;
+  if (state.phase !== "play" || !state.paused || state.needCategory) return state;
   return startTurn({ ...state, paused: false }, now, rng);
 }
 
 export function tapLetter(state, letter, pool, now = Date.now(), rng = Math.random) {
-  if (state.phase !== "play" || !state.started || state.paused) return { state, effect: "ignore" };
+  if (state.phase !== "play" || !state.started || state.paused || state.needCategory) return { state, effect: "ignore" };
   const key = String(letter || "").toUpperCase();
   if (!state.settings.letters[key] || state.locked.includes(key)) return { state, effect: "ignore" };
   let locked = [...state.locked, key];
   let category = state.category;
   let usedCategories = state.usedCategories;
   const active = enabledLetters(state.settings);
+  const current = (state.current + 1) % state.players.length;
   if (active.every((item) => locked.includes(item))) {
+    if (isFreeMode(state.settings)) {
+      return {
+        state: {
+          ...state,
+          locked,
+          current,
+          needCategory: true,
+          paused: false,
+          deadline: null,
+        },
+        effect: "need-category",
+        letter: key,
+      };
+    }
     locked = [];
     category = drawCategory(pool, usedCategories, rng);
     if (!usedCategories.includes(category)) usedCategories = [...usedCategories, category];
   }
-  const current = (state.current + 1) % state.players.length;
   const next = startTurn({ ...state, locked, category, usedCategories, current }, now, rng);
   return { state: next, effect: "tap", letter: key };
 }
 
 export function rejectTerm(state, now = Date.now()) {
-  if (state.phase !== "play" || !state.started || state.paused) return { state, effect: "ignore" };
+  if (state.phase !== "play" || !state.started || state.paused || state.needCategory) return { state, effect: "ignore" };
   return explode(state, now);
 }
 
 export function checkDeadline(state, now = Date.now()) {
-  if (state.phase !== "play" || !state.started || state.paused || state.deadline == null) return { state, effect: "ignore" };
+  if (state.phase !== "play" || !state.started || state.paused || state.needCategory || state.deadline == null) {
+    return { state, effect: "ignore" };
+  }
   if (now < state.deadline) return { state, effect: "ignore" };
   return explode(state, now);
 }
@@ -210,6 +283,7 @@ export function explode(state) {
     phase: "boom",
     started: false,
     paused: false,
+    needCategory: false,
     deadline: null,
     burst: players[current].name,
   };
@@ -226,6 +300,20 @@ export function isGameOver(state) {
 export function afterBoom(state, pool, rng = Math.random) {
   if (state.phase !== "boom") return state;
   if (isGameOver(state)) return { ...state, phase: "end", burst: null };
+  if (isFreeMode(state.settings)) {
+    return {
+      ...state,
+      phase: "play",
+      round: state.round + 1,
+      category: FREE_LABEL,
+      locked: [],
+      started: false,
+      paused: false,
+      deadline: null,
+      burst: null,
+      needCategory: false,
+    };
+  }
   const category = drawCategory(pool, state.usedCategories, rng);
   const usedCategories = state.usedCategories.includes(category) ? state.usedCategories : [...state.usedCategories, category];
   return {
@@ -239,6 +327,7 @@ export function afterBoom(state, pool, rng = Math.random) {
     paused: false,
     deadline: null,
     burst: null,
+    needCategory: false,
   };
 }
 

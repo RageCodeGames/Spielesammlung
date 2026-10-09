@@ -6,12 +6,15 @@ import {
   MIN_PLAYERS,
   ROUND_OPTIONS,
   TIMERS,
+  FREE_LABEL,
   afterBoom,
   checkDeadline,
+  continueFreeCategory,
   defaultSettings,
+  displayCategory,
   enabledLetters,
-  explode,
   freshState,
+  isFreeMode,
   isGameOver,
   isRunning,
   letterCountOk,
@@ -25,6 +28,7 @@ import {
   replay,
   resumeTurn,
   scoreLabel,
+  setFreeCategory,
   startTurn,
   tapLetter,
   uniqueCategories,
@@ -38,12 +42,15 @@ const GAME_KEY = "kajuete:tapper";
 const SETTINGS_KEY = "kajuete:tapper-settings";
 const NAMES_KEY = "kajuete:tapper-names";
 const CATS_KEY = "kajuete:tapper-kategorien";
+const FREE_KEY = "kajuete:tapper-freie-kategorien";
 
 let state = null;
 let step = "players";
 let names = get(NAMES_KEY, ["", ""]);
 let draft = normalizeSettings(get(SETTINGS_KEY, defaultSettings()));
 let customCats = uniqueCategories(get(CATS_KEY, []));
+let freeSuggestions = uniqueCategories(get(FREE_KEY, [])).slice(0, 5);
+let freeDraft = "";
 let bootNotice = null;
 let showingResume = false;
 let showingStandings = false;
@@ -145,9 +152,61 @@ function stopTimers() {
   tickTimer = 0;
 }
 
+function rememberFreeCategory(text) {
+  const name = String(text || "").trim();
+  if (!name || name === FREE_LABEL) return;
+  freeSuggestions = uniqueCategories([name, ...freeSuggestions]).slice(0, 5);
+  set(FREE_KEY, freeSuggestions);
+}
+
+function freeInputValue() {
+  const current = String(state?.category || "").trim();
+  if (freeDraft) return freeDraft;
+  if (current && current !== FREE_LABEL) return current;
+  return "";
+}
+
+function appendFreeCategoryForm(parent, options = {}) {
+  const { title, onPick } = options;
+  parent.append(el("p", "lead", title));
+  const input = document.createElement("input");
+  input.className = "text-input";
+  input.type = "text";
+  input.maxLength = 48;
+  input.placeholder = "Optional eintippen";
+  input.value = freeInputValue();
+  input.setAttribute("aria-label", "Freie Kategorie");
+  input.addEventListener("input", () => {
+    freeDraft = input.value;
+    if (!state || (state.started && !state.needCategory)) return;
+    state = setFreeCategory(state, freeDraft);
+    saveGame();
+    const label = document.querySelector(".category");
+    if (label) label.textContent = displayCategory(state);
+  });
+  parent.append(input);
+  if (freeSuggestions.length) {
+    parent.append(el("p", "group-label", "Zuletzt"));
+    const chips = el("div", "btn-row free-suggestions");
+    for (const cat of freeSuggestions) {
+      const chip = el("button", "btn", cat);
+      chip.type = "button";
+      chip.addEventListener("click", () => {
+        freeDraft = cat;
+        input.value = cat;
+        input.dispatchEvent(new Event("input"));
+        if (onPick) onPick(cat);
+      });
+      chips.append(chip);
+    }
+    parent.append(chips);
+  }
+  return input;
+}
+
 function armTimer() {
   stopTimers();
-  if (!state || state.phase !== "play" || !state.started || state.paused || state.deadline == null) return;
+  if (!state || state.phase !== "play" || !state.started || state.paused || state.needCategory || state.deadline == null) return;
   const wait = Math.max(0, state.deadline - Date.now());
   deadlineTimer = setTimeout(() => {
     const result = checkDeadline(state, Date.now());
@@ -312,6 +371,23 @@ function renderSettings() {
   });
   body.append(bombs, live);
 
+  body.append(el("h2", "group-label", "Kategorie"));
+  const listMode = el("button", draft.categoryMode === "list" ? "choice is-on" : "choice");
+  listMode.type = "button";
+  listMode.append(el("strong", "", "Zufällig aus Liste"), el("small", "", "Eingebaute und eigene Kategorien, keine Wiederholung."));
+  listMode.addEventListener("click", () => {
+    draft = { ...draft, categoryMode: "list" };
+    render();
+  });
+  const freeMode = el("button", draft.categoryMode === "free" ? "choice is-on" : "choice");
+  freeMode.type = "button";
+  freeMode.append(el("strong", "", "Frei (selbst absprechen)"), el("small", "", "Ihr einigt euch vor jeder Runde auf eine Kategorie."));
+  freeMode.addEventListener("click", () => {
+    draft = { ...draft, categoryMode: "free" };
+    render();
+  });
+  body.append(listMode, freeMode);
+
   body.append(el("h2", "group-label", "Spielende"));
   if (draft.scoring === "bombs") {
     const byRound = el("button", draft.endMode === "rounds" ? "choice is-on" : "choice");
@@ -384,41 +460,43 @@ function renderSettings() {
   body.append(toggles);
   if (!letterCountOk(draft)) body.append(el("p", "note is-bad", "Mindestens einen Buchstaben einschalten."));
 
-  body.append(el("h2", "group-label", "Eigene Kategorien"));
-  const addRow = el("div", "preset");
-  const input = document.createElement("input");
-  input.className = "text-input";
-  input.type = "text";
-  input.maxLength = 48;
-  input.placeholder = "Neue Kategorie";
-  input.setAttribute("aria-label", "Eigene Kategorie");
-  const add = el("button", "btn", "Hinzufügen");
-  add.type = "button";
-  add.addEventListener("click", () => {
-    const name = input.value.trim();
-    if (!name) {
-      toast("Bitte eine Kategorie eingeben.");
-      return;
-    }
-    customCats = uniqueCategories([name, ...customCats]);
-    set(CATS_KEY, customCats);
-    input.value = "";
-    render();
-  });
-  addRow.append(input, add);
-  body.append(addRow);
-  for (const cat of customCats) {
-    const row = el("div", "preset");
-    row.append(el("span", "", cat));
-    const del = el("button", "btn", "Löschen");
-    del.type = "button";
-    del.addEventListener("click", () => {
-      customCats = customCats.filter((item) => item !== cat);
+  if (draft.categoryMode === "list") {
+    body.append(el("h2", "group-label", "Eigene Kategorien"));
+    const addRow = el("div", "preset");
+    const input = document.createElement("input");
+    input.className = "text-input";
+    input.type = "text";
+    input.maxLength = 48;
+    input.placeholder = "Neue Kategorie";
+    input.setAttribute("aria-label", "Eigene Kategorie");
+    const add = el("button", "btn", "Hinzufügen");
+    add.type = "button";
+    add.addEventListener("click", () => {
+      const name = input.value.trim();
+      if (!name) {
+        toast("Bitte eine Kategorie eingeben.");
+        return;
+      }
+      customCats = uniqueCategories([name, ...customCats]);
       set(CATS_KEY, customCats);
+      input.value = "";
       render();
     });
-    row.append(del);
-    body.append(row);
+    addRow.append(input, add);
+    body.append(addRow);
+    for (const cat of customCats) {
+      const row = el("div", "preset");
+      row.append(el("span", "", cat));
+      const del = el("button", "btn", "Löschen");
+      del.type = "button";
+      del.addEventListener("click", () => {
+        customCats = customCats.filter((item) => item !== cat);
+        set(CATS_KEY, customCats);
+        render();
+      });
+      row.append(del);
+      body.append(row);
+    }
   }
 
   const back = el("button", "btn", "Zu den Spielern");
@@ -433,6 +511,7 @@ function renderSettings() {
   go.addEventListener("click", () => {
     if (!letterCountOk(draft)) return;
     set(SETTINGS_KEY, draft);
+    freeDraft = "";
     state = freshState(names, draft, allCategories());
     saveGame();
     render();
@@ -461,7 +540,7 @@ function renderPlay() {
   body.append(bar);
   const who = state.players[state.current];
   body.append(el("p", "who", who.name));
-  body.append(el("p", "category", state.category));
+  body.append(el("p", "category", displayCategory(state)));
   const hint = state.settings.endMode === "bombs" && state.settings.scoring === "bombs"
     ? `Runde ${state.round} · bis ${state.settings.bombLimit} Bombenpunkte`
     : `Runde ${state.round} von ${state.settings.rounds}`;
@@ -469,11 +548,12 @@ function renderPlay() {
 
   const grid = el("div", "letters");
   const active = enabledLetters(state.settings);
+  const lettersBlocked = !state.started || state.paused || state.needCategory;
   for (const letter of active) {
     const locked = state.locked.includes(letter);
     const button = el("button", locked ? "letter is-locked" : "letter", letter);
     button.type = "button";
-    button.disabled = locked || !state.started || state.paused;
+    button.disabled = locked || lettersBlocked;
     button.addEventListener("click", () => {
       const late = checkDeadline(state, Date.now());
       if (late.effect === "boom") {
@@ -483,6 +563,7 @@ function renderPlay() {
       const tapped = tapLetter(state, letter, allCategories(), Date.now());
       if (tapped.effect === "ignore") return;
       state = tapped.state;
+      if (tapped.effect === "need-category") freeDraft = "";
       saveGame();
       render();
     });
@@ -491,23 +572,38 @@ function renderPlay() {
   body.append(grid);
 
   if (!state.started) {
-    const other = el("button", "btn", "Andere Kategorie");
-    other.type = "button";
-    other.addEventListener("click", () => {
-      state = otherCategory(state, allCategories());
-      saveGame();
-      render();
-    });
+    let freeField = null;
+    if (isFreeMode(state.settings)) {
+      freeField = appendFreeCategoryForm(dock, {
+        title: "Sprecht eine Kategorie ab",
+      });
+    }
     const start = el("button", "btn primary", "Start");
     start.type = "button";
     start.addEventListener("click", () => {
+      if (isFreeMode(state.settings)) {
+        const typed = freeField ? freeField.value : freeDraft;
+        rememberFreeCategory(typed);
+        state = setFreeCategory(state, typed);
+        freeDraft = "";
+      }
       state = startTurn(state, Date.now());
       saveGame();
       render();
       unlock();
     });
-    dock.append(start, other);
-  } else {
+    dock.append(start);
+    if (!isFreeMode(state.settings)) {
+      const other = el("button", "btn", "Andere Kategorie");
+      other.type = "button";
+      other.addEventListener("click", () => {
+        state = otherCategory(state, allCategories());
+        saveGame();
+        render();
+      });
+      dock.append(other);
+    }
+  } else if (!state.needCategory) {
     const invalid = el("button", "btn", "Ungültig");
     invalid.type = "button";
     invalid.disabled = state.paused;
@@ -536,9 +632,35 @@ function renderPlay() {
 
   view.append(body, dock);
   app.replaceChildren(view);
-  if (state.paused) renderPause();
+  if (state.needCategory) renderNeedCategory();
+  else if (state.paused) renderPause();
   if (showingStandings) renderStandings(false);
   armTimer();
+}
+
+function renderNeedCategory() {
+  const back = el("div", "pause-back");
+  const card = el("div", "dialog");
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  const field = appendFreeCategoryForm(card, {
+    title: "Alle Buchstaben weg – neue Kategorie absprechen",
+  });
+  const go = el("button", "btn primary", "Weiter");
+  go.type = "button";
+  go.addEventListener("click", () => {
+    const typed = field.value;
+    rememberFreeCategory(typed);
+    state = continueFreeCategory(state, typed, Date.now());
+    freeDraft = "";
+    saveGame();
+    render();
+    unlock();
+  });
+  card.append(go);
+  back.append(card);
+  app.append(back);
+  field.focus();
 }
 
 function renderPause() {
@@ -696,7 +818,7 @@ function boot() {
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "hidden") return;
-  if (!state || state.phase !== "play" || !state.started || state.paused) return;
+  if (!state || state.phase !== "play" || !state.started || state.paused || state.needCategory) return;
   state = pause(state);
   saveGame();
   render();

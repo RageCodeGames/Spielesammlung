@@ -99,6 +99,11 @@ body.tapper #app {
   flex: 1 1 auto;
 }
 
+.free-suggestions .btn {
+  flex: 0 1 auto;
+  font-size: 0.95rem;
+}
+
 .group-label {
   margin: 0.2rem 0 0;
   color: var(--muted);
