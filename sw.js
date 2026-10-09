@@ -8,7 +8,7 @@
  * skipWaiting läuft nicht von selbst – erst, wenn das Banner angetippt wird.
  */
 
-const CACHE_NAME = "kajuete-v7";
+const CACHE_NAME = "kajuete-v9";
 
 const PRECACHE = [
   "./",
@@ -21,6 +21,13 @@ const PRECACHE = [
   "./shared/storage.js",
   "./shared/wakelock.js",
   "./shared/update.js",
+  "./shared/firebase-config.js",
+  "./shared/online.js",
+  "./shared/lobby.js",
+  "./shared/qrcode.js",
+  "./shared/vendor/qrcode-generator.js",
+  "./dev/online-test.html",
+  "./dev/online-test.js",
   "./games/tapper/index.html",
   "./games/tapper/game.css",
   "./games/tapper/logic.js",
@@ -88,11 +95,30 @@ self.addEventListener("message", (event) => {
   }
 });
 
+function isFirebaseRequest(url) {
+  const host = url.hostname;
+  const path = url.pathname;
+  if (host === "www.gstatic.com" && path.includes("/firebasejs/")) return true;
+  if (host.endsWith(".firebasedatabase.app") || host.endsWith(".firebaseio.com")) return true;
+  if (host.endsWith(".firebaseapp.com") || host.endsWith(".googleapis.com")) {
+    return (
+      host.startsWith("identitytoolkit") ||
+      host.startsWith("securetoken") ||
+      path.includes("identitytoolkit") ||
+      path.includes("securetoken") ||
+      host.includes("firebase")
+    );
+  }
+  return false;
+}
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET") return;
 
   const url = new URL(request.url);
+  // Firebase Auth + Realtime Database nie aus dem Cache, auch nicht später per Proxy.
+  if (isFirebaseRequest(url)) return;
   if (url.origin !== self.location.origin) return;
   if (url.protocol !== "http:" && url.protocol !== "https:") return;
   if (request.url.split("?")[0] === SW_URL) return;
