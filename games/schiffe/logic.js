@@ -196,7 +196,13 @@ export function isRunning(data) {
   if (!["place", "battle", "end"].includes(data.phase)) return false;
   if (!validGrid(data.enemy, data.width, data.height) || !validGrid(data.incoming, data.width, data.height)) return false;
   if (!Array.isArray(data.ships) || !data.ships.every((ship) => ship && SHAPE_BY_ID[ship.shapeId])) return false;
-  if (!Array.isArray(data.enemyFleet) || !data.rules || !data.code) return false;
+  if (!Array.isArray(data.enemyFleet) || !data.rules) return false;
+  if (data.versus === "bot") {
+    if (!["easy", "medium", "hard"].includes(data.difficulty)) return false;
+    if (data.phase !== "place" && !Array.isArray(data.botShips)) return false;
+    return true;
+  }
+  if (!data.code) return false;
   return true;
 }
 
@@ -279,7 +285,7 @@ export function sunkText(ship) {
   return `(${ship.name}, ${ship.size})`;
 }
 
-export function beginPlacement(rules) {
+export function beginPlacement(rules, extras = null) {
   const fixed = {
     mode: rules.mode,
     width: rules.width,
@@ -314,6 +320,11 @@ export function beginPlacement(rules) {
     shotLog: [],
     history: [],
     outcome: null,
+    versus: extras?.versus === "bot" ? "bot" : "hotseat",
+    difficulty: extras?.versus === "bot" ? extras.difficulty || "medium" : null,
+    extraShot: extras?.versus === "bot" ? extras.extraShot !== false : false,
+    turn: "player",
+    botShips: [],
   };
 }
 
@@ -378,8 +389,24 @@ export function dealRandom(state) {
   return null;
 }
 
+export function randomFleet(rules, rng = Math.random) {
+  const ships = expandFleet(rules);
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    for (const ship of ships) ship.cells = null;
+    if (randomPlacement(ships, rules.allowTouch, rules.width, rules.height, rng, { budget: 20000, spotLimit: 60 })) {
+      return ships;
+    }
+  }
+  return null;
+}
+
 export function beginBattle(state) {
   if (!allPlaced(state.ships)) return state;
+  if (state.versus === "bot") {
+    const botShips = randomFleet(state.rules);
+    if (!botShips) return null;
+    return { ...state, phase: "battle", selectedId: null, botShips, turn: "player", history: [] };
+  }
   return { ...state, phase: "battle", selectedId: null };
 }
 
@@ -408,7 +435,7 @@ export function commitSunk(state, c, r, slotIndex) {
 export function fireIncoming(state, c, r) {
   if (state.phase !== "battle") return { state, result: "ignore" };
   if (state.incoming[r][c]) return { state, result: "already" };
-  const next = snapshot(state);
+  const next = state.versus === "bot" ? fork(state) : snapshot(state);
   const ship = shipAt(next.ships, c, r);
   let result = "water";
   if (ship) {
@@ -416,6 +443,11 @@ export function fireIncoming(state, c, r) {
     result = ship.cells.every((cell) => next.incoming[cell.r][cell.c]) ? "sunk" : "hit";
     if (result === "sunk") {
       for (const cell of ship.cells) next.incoming[cell.r][cell.c] = { result: "sunk" };
+      if (next.versus === "bot" && !next.allowTouch) {
+        for (const cell of around(ship.cells, next.width, next.height)) {
+          if (!next.incoming[cell.r][cell.c]) next.incoming[cell.r][cell.c] = { result: "water", auto: true };
+        }
+      }
     }
   } else {
     next.incoming[r][c] = { result: "water" };
@@ -426,13 +458,91 @@ export function fireIncoming(state, c, r) {
     result,
     name: result === "sunk" ? ship.name : null,
     size: result === "sunk" ? ship.size : null,
+    shapeId: result === "sunk" ? ship.shapeId : null,
   });
   if (next.ships.every((item) => item.cells.every((cell) => next.incoming[cell.r][cell.c]))) {
     next.phase = "end";
     next.outcome = "lost";
+  } else if (next.versus === "bot") {
+    next.turn = next.extraShot && result !== "water" ? "bot" : "player";
   }
   return { state: next, result, ship: result === "sunk" ? ship : null };
 }
+
+export function fireAtBot(state, c, r) {
+  if (state.versus !== "bot" || state.phase !== "battle") return { state, result: "ignore" };
+  if (state.enemy[r][c]) return { state, result: "already" };
+  if (state.turn && state.turn !== "player") return { state, result: "ignore" };
+  const next = fork(state);
+  const ship = shipAt(next.botShips, c, r);
+  let result = "water";
+  if (ship) {
+    next.enemy[r][c] = { kind: "hit", auto: false, group: null };
+    result = ship.cells.every((cell) => next.enemy[cell.r][cell.c]) ? "sunk" : "hit";
+    if (result === "sunk") {
+      const group = next.nextGroup;
+      next.nextGroup += 1;
+      for (const cell of ship.cells) next.enemy[cell.r][cell.c] = { kind: "sunk", auto: false, group };
+      const slot = next.enemyFleet.find((item) => !item.sunk && item.shapeId === ship.shapeId);
+      if (slot) {
+        slot.sunk = true;
+        slot.group = group;
+      }
+      if (!next.allowTouch) {
+        for (const cell of around(ship.cells, next.width, next.height)) {
+          if (!next.enemy[cell.r][cell.c]) next.enemy[cell.r][cell.c] = { kind: "water", auto: true, group };
+        }
+      }
+    }
+  } else {
+    next.enemy[r][c] = { kind: "water", auto: false, group: null };
+  }
+  if (next.enemyFleet.every((slot) => slot.sunk)) {
+    next.phase = "end";
+    next.outcome = "won";
+  } else {
+    next.turn = next.extraShot && result !== "water" ? "player" : "bot";
+  }
+  return { state: next, result, ship: result === "sunk" ? ship : null };
+}
+
+export function botKnowledge(state) {
+  const remaining = [];
+  for (const ship of state.ships) {
+    const sunk = Boolean(ship.cells?.length && ship.cells.every((cell) => state.incoming[cell.r][cell.c]?.result === "sunk"));
+    if (!sunk) remaining.push({ shapeId: ship.shapeId, size: ship.size });
+  }
+  const grid = [];
+  for (let r = 0; r < state.height; r += 1) {
+    const row = [];
+    for (let c = 0; c < state.width; c += 1) {
+      const mark = state.incoming[r][c];
+      row.push(mark ? mark.result : null);
+    }
+    grid.push(row);
+  }
+  return {
+    width: state.width,
+    height: state.height,
+    allowTouch: !!state.allowTouch,
+    grid,
+    remaining,
+  };
+}
+
+export function incomingShotStats(state) {
+  const shots = [];
+  for (let r = 0; r < state.height; r += 1) {
+    for (let c = 0; c < state.width; c += 1) {
+      const mark = state.incoming[r][c];
+      if (mark && !mark.auto) shots.push(mark);
+    }
+  }
+  const hits = shots.filter((mark) => mark.result === "hit" || mark.result === "sunk").length;
+  return { shots: shots.length, hits, rate: shots.length ? Math.round((hits / shots.length) * 100) : 0 };
+}
+
+export { variants as shapeVariants };
 
 export function undo(state) {
   if (state.phase !== "battle" || !state.history.length) return state;
@@ -610,16 +720,27 @@ function around(cells, width, height) {
   return extra;
 }
 
-function snapshot(state) {
+function copyShips(ships) {
+  return (ships || []).map((ship) => ({ ...ship, cells: ship.cells ? ship.cells.map((cell) => ({ ...cell })) : null }));
+}
+
+function fork(state) {
   return {
     ...state,
-    ships: state.ships.map((ship) => ({ ...ship, cells: ship.cells ? ship.cells.map((cell) => ({ ...cell })) : null })),
+    ships: copyShips(state.ships),
+    botShips: copyShips(state.botShips),
     enemy: state.enemy.map((row) => row.map((cell) => (cell ? { ...cell } : null))),
     incoming: state.incoming.map((row) => row.map((cell) => (cell ? { ...cell } : null))),
     enemyFleet: state.enemyFleet.map((slot) => ({ ...slot })),
     shotLog: state.shotLog.map((entry) => ({ ...entry })),
-    history: [...state.history, state].slice(-40),
+    history: state.history || [],
   };
+}
+
+function snapshot(state) {
+  const next = fork(state);
+  next.history = [...state.history, state].slice(-40);
+  return next;
 }
 
 function randomPlacement(ships, allowTouch, width, height, rng, options = {}) {

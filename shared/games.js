@@ -19,7 +19,7 @@ export const games = [
   {
     id: "tapper",
     name: "Tapper",
-    description: "Tippe, so schnell du kannst.",
+    description: "Nennt Begriffe, bevor die Bombe explodiert.",
     emoji: "👆",
     href: "./games/tapper/index.html",
     available: true,

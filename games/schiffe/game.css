@@ -215,6 +215,21 @@ body.schiffe.is-battle #app {
   line-height: 1.2;
 }
 
+.bot-banner {
+  margin: 0;
+  width: min(100%, calc(var(--label) + var(--cols, 10) * var(--cell)));
+  padding: 0.35rem 0.6rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  text-align: center;
+}
+
+.grid.is-locked {
+  pointer-events: none;
+}
+
 .grid {
   display: grid;
   grid-template-columns: var(--label) repeat(var(--cols, 10), var(--cell));
@@ -256,10 +271,15 @@ body.schiffe.is-battle #app {
   background: #9a3d3d;
 }
 
-.cell.is-picked {
+.cell.is-picked,
+.cell.is-flash {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
   z-index: 1;
+}
+
+.cell.is-flash {
+  background: #e3a44a;
 }
 
 .cell.mark-water::after,

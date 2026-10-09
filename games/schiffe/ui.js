@@ -4,6 +4,7 @@ import {
   assessFleet,
   beginBattle,
   beginPlacement,
+  botKnowledge,
   commitSunk,
   coord,
   COLS,
@@ -11,9 +12,11 @@ import {
   decodeRules,
   defaultCounts,
   encodeRules,
+  fireAtBot,
   fireIncoming,
   formatCode,
   freshState,
+  incomingShotStats,
   isRunning,
   liftAt,
   logText,
@@ -35,13 +38,22 @@ import {
   sunkText,
   undo,
 } from "./logic.js";
+import { benchmarkBots, chooseShot } from "./bot.js";
 import { playTone, unlock } from "../../shared/sound.js";
 import { get, set } from "../../shared/storage.js";
 import { requestWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
 
 const STORAGE_KEY = "kajuete:schiffe";
+const BOT_KEY = "kajuete:schiffe-bot";
 const PRESET_KEY = "kajuete:schiffe-vorlagen";
+const STATS_KEY = "kajuete:schiffe-bot-stats";
+
+const DIFFICULTIES = [
+  ["easy", "Leicht", "Tippt eher zufällig."],
+  ["medium", "Mittel", "Sucht Treffer nach und hält die Linie."],
+  ["hard", "Schwer", "Rechnet wahrscheinliche Schiffslagen aus."],
+];
 
 const MODES = [
   ["classic", "Klassisch", "10×10 · 5, 4, 3, 3, 2"],
@@ -55,6 +67,9 @@ let draft = rulesFor("classic", false);
 let customWidth = 10;
 let customHeight = 10;
 let customCounts = defaultCounts();
+let playMode = null;
+let difficulty = "medium";
+let extraShot = true;
 let pendingMenu = null;
 let boardTab = "enemy";
 let tabMode = false;
@@ -63,6 +78,11 @@ let bootNotice = null;
 let toastTimer = 0;
 let announceTimer = 0;
 let fitToken = 0;
+let botTimer = 0;
+let botSeq = 0;
+let flashCell = null;
+let hotseatSave = null;
+let botSave = null;
 
 const app = document.getElementById("app");
 
@@ -74,7 +94,44 @@ function el(tag, className, text) {
 }
 
 function save() {
-  if (state.phase === "place" || state.phase === "battle" || state.phase === "end") set(STORAGE_KEY, state);
+  if (state.phase !== "place" && state.phase !== "battle" && state.phase !== "end") return;
+  if (state.versus === "bot") set(BOT_KEY, state);
+  else set(STORAGE_KEY, state);
+}
+
+function isBot() {
+  return state.versus === "bot" || playMode === "bot";
+}
+
+function loadStats() {
+  const data = get(STATS_KEY, null);
+  const blank = () => ({ wins: 0, losses: 0 });
+  const next = { easy: blank(), medium: blank(), hard: blank() };
+  if (!data || typeof data !== "object") return next;
+  for (const key of ["easy", "medium", "hard"]) {
+    next[key].wins = Number(data[key]?.wins) || 0;
+    next[key].losses = Number(data[key]?.losses) || 0;
+  }
+  return next;
+}
+
+function recordStats() {
+  if (state.versus !== "bot" || state.statsRecorded || (state.outcome !== "won" && state.outcome !== "lost")) return;
+  const stats = loadStats();
+  const row = stats[state.difficulty] || stats.medium;
+  if (state.outcome === "won") row.wins += 1;
+  else row.losses += 1;
+  set(STATS_KEY, stats);
+  state = { ...state, statsRecorded: true };
+  save();
+}
+
+function clearBotTimer() {
+  botSeq += 1;
+  if (botTimer) {
+    clearTimeout(botTimer);
+    botTimer = 0;
+  }
 }
 
 function toast(message) {
@@ -177,15 +234,45 @@ function askNewGame() {
 }
 
 function startFresh() {
+  clearBotTimer();
   pendingMenu = null;
+  flashCell = null;
   boardTab = "enemy";
   bootNotice = null;
+  if (showingResume) {
+    if (isRunning(hotseatSave)) set(STORAGE_KEY, freshState());
+    if (isRunning(botSave)) set(BOT_KEY, freshState());
+  } else if (state.versus === "bot" || playMode === "bot") set(BOT_KEY, freshState());
+  else set(STORAGE_KEY, freshState());
+  playMode = null;
+  difficulty = "medium";
+  extraShot = true;
   draft = rulesFor("classic", false);
   customWidth = 10;
   customHeight = 10;
   customCounts = defaultCounts();
   state = freshState();
-  set(STORAGE_KEY, state);
+  render();
+}
+
+function startRematch() {
+  clearBotTimer();
+  pendingMenu = null;
+  flashCell = null;
+  boardTab = "enemy";
+  playMode = "bot";
+  difficulty = state.difficulty || "medium";
+  extraShot = state.extraShot !== false;
+  draft = {
+    mode: state.rules.mode,
+    width: state.rules.width,
+    height: state.rules.height,
+    allowTouch: !!state.rules.allowTouch,
+    counts: { ...state.rules.counts },
+  };
+  rememberCustom(draft);
+  state = beginPlacement(draft, { versus: "bot", difficulty, extraShot });
+  save();
   render();
 }
 
@@ -266,7 +353,8 @@ function paintGrid(grid, kind) {
         if (ship) button.classList.add("ship");
         if (mark?.result === "water") {
           button.classList.add("mark-water");
-          label.push("Wasser");
+          if (mark.auto) button.classList.add("auto");
+          label.push(mark.auto ? "Wasser, automatisch" : "Wasser");
         } else if (mark?.result === "sunk" || (ship && ownSunk(ship))) {
           button.classList.add("mark-sunk");
           label.push("Versenkt");
@@ -274,6 +362,24 @@ function paintGrid(grid, kind) {
           button.classList.add("mark-hit");
           label.push("Treffer");
         } else if (ship) label.push(ship.name);
+      } else if (kind === "reveal-bot") {
+        const ship = shipAt(state.botShips || [], c, r);
+        const mark = state.enemy[r][c];
+        if (ship) {
+          button.classList.add("ship");
+          label.push(ship.name);
+        }
+        if (mark?.kind === "water") {
+          button.classList.add("mark-water");
+          if (mark.auto) button.classList.add("auto");
+          label.push("Wasser");
+        } else if (mark?.kind === "hit") {
+          button.classList.add("mark-hit");
+          label.push("Treffer");
+        } else if (mark?.kind === "sunk") {
+          button.classList.add("mark-sunk");
+          label.push("Versenkt");
+        }
       } else {
         const mark = state.enemy[r][c];
         if (mark?.kind === "water") {
@@ -288,6 +394,9 @@ function paintGrid(grid, kind) {
           label.push("Versenkt");
         }
         if (pendingMenu && pendingMenu.c === c && pendingMenu.r === r) button.classList.add("is-picked");
+      }
+      if (flashCell && flashCell.c === c && flashCell.r === r && (kind === "own" || kind === flashCell.board)) {
+        button.classList.add("is-flash");
       }
       button.setAttribute("aria-label", label.join(", "));
     }
@@ -434,6 +543,34 @@ function askWhichShip(choice) {
   document.body.append(back);
 }
 
+function renderVersus() {
+  document.body.classList.remove("is-battle");
+  const view = el("section", "screen setup");
+  const body = el("div", "screen-body");
+  const dock = el("div", "screen-dock");
+  body.append(backLink());
+  body.append(el("h1", "", "Schiffe versenken"));
+  body.append(el("p", "lead", "Zu zweit per Zurufen oder allein gegen den Bot."));
+  if (bootNotice) body.append(el("p", "note is-warn", bootNotice));
+  const hotseat = el("button", "choice", "");
+  hotseat.type = "button";
+  hotseat.append(el("strong", "", "Zu zweit (Zurufen)"), el("small", "", "Zwei Handys, Schüsse werden zugerufen."));
+  hotseat.addEventListener("click", () => {
+    playMode = "hotseat";
+    render();
+  });
+  const bot = el("button", "choice", "");
+  bot.type = "button";
+  bot.append(el("strong", "", "Gegen Bot"), el("small", "", "Allein gegen den Computer."));
+  bot.addEventListener("click", () => {
+    playMode = "bot";
+    render();
+  });
+  body.append(hotseat, bot);
+  view.append(body, dock);
+  app.replaceChildren(view);
+}
+
 function renderSettings() {
   document.body.classList.remove("is-battle");
   const view = el("section", "screen setup");
@@ -441,9 +578,48 @@ function renderSettings() {
   const dock = el("div", "screen-dock");
 
   body.append(backLink());
-  body.append(el("h1", "", "Schiffe versenken"));
-  body.append(el("p", "lead", "Jeder spielt auf dem eigenen Handy. Die Schüsse ruft ihr euch zu."));
+  body.append(el("h1", "", isBot() ? "Gegen Bot" : "Schiffe versenken"));
+  body.append(el("p", "lead", isBot()
+    ? "Gleiche Flotte wie zu zweit. Der Bot verteilt seine Schiffe versteckt."
+    : "Jeder spielt auf dem eigenen Handy. Die Schüsse ruft ihr euch zu."));
   if (bootNotice) body.append(el("p", "note is-warn", bootNotice));
+
+  if (isBot()) {
+    body.append(el("h2", "group-label", "Schwierigkeit"));
+    const diffs = el("div", "choices");
+    for (const [id, title, detail] of DIFFICULTIES) {
+      const button = el("button", difficulty === id ? "choice is-on" : "choice");
+      button.type = "button";
+      button.setAttribute("aria-pressed", difficulty === id ? "true" : "false");
+      button.append(el("strong", "", title), el("small", "", detail));
+      button.addEventListener("click", () => {
+        difficulty = id;
+        render();
+      });
+      diffs.append(button);
+    }
+    body.append(diffs);
+    const again = el("button", extraShot ? "switch-row is-on" : "switch-row");
+    again.type = "button";
+    again.setAttribute("role", "switch");
+    again.setAttribute("aria-checked", extraShot ? "true" : "false");
+    again.append(
+      el("strong", "", "Bei Treffer nochmal schießen"),
+      el("small", "", extraShot ? "An: Nach Treffer oder Versenkt bleibt man dran." : "Aus: Immer abwechselnd.")
+    );
+    again.addEventListener("click", () => {
+      extraShot = !extraShot;
+      render();
+    });
+    body.append(again);
+    const stats = loadStats();
+    const statLine = el("p", "lead");
+    statLine.textContent = DIFFICULTIES.map(([id, title]) => {
+      const row = stats[id];
+      return `${title} ${row.wins}–${row.losses}`;
+    }).join(" · ");
+    body.append(statLine);
+  }
 
   const choices = el("div", "choices");
   for (const [id, title, detail] of MODES) {
@@ -474,11 +650,14 @@ function renderSettings() {
     render();
   });
 
-  body.append(choices, touch, codeLine(encodeRules(draft)));
-  const codeButton = el("button", "btn", "Code eingeben");
-  codeButton.type = "button";
-  codeButton.addEventListener("click", askCode);
-  body.append(codeButton);
+  body.append(choices, touch);
+  if (!isBot()) {
+    body.append(codeLine(encodeRules(draft)));
+    const codeButton = el("button", "btn", "Code eingeben");
+    codeButton.type = "button";
+    codeButton.addEventListener("click", askCode);
+    body.append(codeButton);
+  }
 
   if (draft.mode !== "custom") {
     const preview = el("div", "mini-ships");
@@ -555,7 +734,7 @@ function renderSettings() {
   next.addEventListener("click", () => {
     if (next.disabled) return;
     boardTab = "enemy";
-    state = beginPlacement(draft);
+    state = beginPlacement(draft, isBot() ? { versus: "bot", difficulty, extraShot } : null);
     save();
     render();
   });
@@ -614,7 +793,8 @@ function renderPlace() {
   bar.append(el("span", "spacer"), fresh);
   view.append(bar);
   view.append(el("h1", "", "Schiffe legen"));
-  view.append(codeLine(state.code));
+  if (!isBot()) view.append(codeLine(state.code));
+  else view.append(el("p", "lead", `Bot · ${DIFFICULTIES.find((item) => item[0] === state.difficulty)?.[1] || "Mittel"}`));
 
   const grid = makeGrid("place");
   view.append(grid);
@@ -733,7 +913,12 @@ function renderPlace() {
   done.disabled = !allPlaced(state.ships);
   done.addEventListener("click", () => {
     if (!allPlaced(state.ships)) return;
-    state = beginBattle(state);
+    const next = beginBattle(state);
+    if (!next) {
+      toast("Der Bot findet keinen Platz. Bitte andere Einstellungen.");
+      return;
+    }
+    state = next;
     boardTab = "enemy";
     save();
     render();
@@ -744,24 +929,80 @@ function renderPlace() {
   fitPlace(view);
 }
 
+function announceResult(result, ship, onClose) {
+  const title = result === "water" ? "WASSER" : result === "hit" ? "TREFFER!" : "VERSENKT!";
+  const sub = result === "sunk" && ship ? sunkText(ship) : "";
+  showAnnounce(result, title, sub, onClose);
+  unlock().then(() => playResult(result));
+}
+
+function scheduleBotShot() {
+  if (state.versus !== "bot" || state.phase !== "battle" || state.turn !== "bot") return;
+  if (botTimer) return;
+  const seq = botSeq;
+  botTimer = setTimeout(() => {
+    botTimer = 0;
+    if (seq !== botSeq) return;
+    if (state.versus !== "bot" || state.phase !== "battle" || state.turn !== "bot") return;
+    const view = botKnowledge(state);
+    const shot = chooseShot(view, state.difficulty);
+    if (!shot) {
+      toast("Der Bot findet kein freies Feld.");
+      return;
+    }
+    flashCell = { c: shot.c, r: shot.r, board: "own" };
+    if (tabMode) boardTab = "own";
+    render();
+    botTimer = setTimeout(() => {
+      botTimer = 0;
+      if (seq !== botSeq) return;
+      const fired = fireIncoming(state, shot.c, shot.r);
+      if (fired.result === "already" || fired.result === "ignore") {
+        flashCell = null;
+        render();
+        return;
+      }
+      state = fired.state;
+      flashCell = null;
+      save();
+      const ended = state.phase === "end";
+      if (ended) recordStats();
+      if (tabMode) boardTab = "own";
+      render();
+      announceResult(fired.result, fired.ship, () => {
+        if (ended) return;
+        if (state.turn === "bot") scheduleBotShot();
+        else if (tabMode) {
+          boardTab = "enemy";
+          render();
+        }
+      });
+    }, 320);
+  }, 800);
+}
+
 function renderBattle() {
   document.body.classList.add("is-battle");
   tabMode = tabLock || wantsTabs();
   const bar = el("div", "battle-bar");
   bar.append(backLink());
-  const undoButton = el("button", "btn", "Rückgängig");
-  undoButton.type = "button";
-  undoButton.disabled = state.history.length === 0;
-  undoButton.addEventListener("click", () => {
-    state = undo(state);
-    pendingMenu = null;
-    save();
-    render();
-  });
   const fresh = el("button", "btn", "Neues Spiel");
   fresh.type = "button";
   fresh.addEventListener("click", askNewGame);
-  bar.append(el("span", "spacer"), undoButton, fresh);
+  if (isBot()) {
+    bar.append(el("span", "spacer"), fresh);
+  } else {
+    const undoButton = el("button", "btn", "Rückgängig");
+    undoButton.type = "button";
+    undoButton.disabled = state.history.length === 0;
+    undoButton.addEventListener("click", () => {
+      state = undo(state);
+      pendingMenu = null;
+      save();
+      render();
+    });
+    bar.append(el("span", "spacer"), undoButton, fresh);
+  }
 
   const battle = el("div", "battle");
   if (tabMode) {
@@ -786,13 +1027,45 @@ function renderBattle() {
     fleetRow("Ich", state.ships.map((ship) => ({ shapeId: ship.shapeId, sunk: ownSunk(ship) })), true)
   );
 
+  if (isBot() && state.turn === "bot" && state.phase === "battle") {
+    battle.append(el("p", "bot-banner", "Bot ist dran"));
+  }
+
   const enemyBlock = el("div", "board-block");
-  enemyBlock.append(el("p", "board-title", "Gegnerisches Feld"));
+  enemyBlock.append(el("p", "board-title", isBot() ? "Feld des Bots" : "Gegnerisches Feld"));
   const enemyGrid = makeGrid("enemy");
+  if (isBot() && state.turn !== "player") enemyGrid.classList.add("is-locked");
   enemyGrid.addEventListener("click", (event) => {
     const button = event.target.closest(".cell");
     if (!button) return;
-    pendingMenu = { c: Number(button.dataset.c), r: Number(button.dataset.r) };
+    const c = Number(button.dataset.c);
+    const r = Number(button.dataset.r);
+    if (isBot()) {
+      if (state.turn !== "player" || state.phase !== "battle") return;
+      const fired = fireAtBot(state, c, r);
+      if (fired.result === "already") {
+        toast("Schon beschossen");
+        return;
+      }
+      if (fired.result === "ignore") return;
+      state = fired.state;
+      pendingMenu = null;
+      save();
+      const ended = state.phase === "end";
+      if (ended) recordStats();
+      if (tabMode) boardTab = "enemy";
+      render();
+      announceResult(fired.result, fired.ship, () => {
+        if (ended) return;
+        if (state.turn === "bot") {
+          if (tabMode) boardTab = "own";
+          render();
+          scheduleBotShot();
+        }
+      });
+      return;
+    }
+    pendingMenu = { c, r };
     render();
   });
   enemyBlock.append(enemyGrid);
@@ -800,43 +1073,41 @@ function renderBattle() {
   const ownBlock = el("div", "board-block");
   ownBlock.append(el("p", "board-title", "Mein Feld"));
   const ownGrid = makeGrid("own");
-  ownGrid.addEventListener("click", async (event) => {
-    const button = event.target.closest(".cell");
-    if (!button) return;
-    const c = Number(button.dataset.c);
-    const r = Number(button.dataset.r);
-    const fired = fireIncoming(state, c, r);
-    if (fired.result === "already") {
-      toast("Schon beschossen");
-      return;
-    }
-    if (fired.result === "ignore") return;
-    state = fired.state;
-    pendingMenu = null;
-    save();
-    const ended = state.phase === "end";
-    if (!ended && tabMode) boardTab = "own";
-    const title = fired.result === "water" ? "WASSER" : fired.result === "hit" ? "TREFFER!" : "VERSENKT!";
-    const sub = fired.result === "sunk" ? sunkText(fired.ship) : "";
-    render();
-    showAnnounce(fired.result, title, sub, () => {
-      if (!ended && tabMode && state.phase === "battle") {
-        boardTab = "enemy";
-        render();
+  if (!isBot()) {
+    ownGrid.addEventListener("click", async (event) => {
+      const button = event.target.closest(".cell");
+      if (!button) return;
+      const c = Number(button.dataset.c);
+      const r = Number(button.dataset.r);
+      const fired = fireIncoming(state, c, r);
+      if (fired.result === "already") {
+        toast("Schon beschossen");
+        return;
       }
+      if (fired.result === "ignore") return;
+      state = fired.state;
+      pendingMenu = null;
+      save();
+      const ended = state.phase === "end";
+      if (!ended && tabMode) boardTab = "own";
+      render();
+      announceResult(fired.result, fired.ship, () => {
+        if (!ended && tabMode && state.phase === "battle") {
+          boardTab = "enemy";
+          render();
+        }
+      });
     });
-    await unlock();
-    playResult(fired.result);
-  });
+  }
   ownBlock.append(ownGrid);
 
   if (tabMode) battle.append(status, boardTab === "own" ? ownBlock : enemyBlock);
   else battle.append(enemyBlock, status, ownBlock);
 
-  const code = codeLine(state.code);
-  app.replaceChildren(bar, code, battle);
+  if (isBot()) app.replaceChildren(bar, battle);
+  else app.replaceChildren(bar, codeLine(state.code), battle);
 
-  if (pendingMenu && (!tabMode || boardTab === "enemy")) {
+  if (!isBot() && pendingMenu && (!tabMode || boardTab === "enemy")) {
     const menu = el("div", "mark-menu");
     menu.setAttribute("role", "dialog");
     menu.setAttribute("aria-label", "Schuss eintragen");
@@ -881,17 +1152,58 @@ function renderBattle() {
       return;
     }
     requestAnimationFrame(fitBoards);
+    if (isBot() && state.turn === "bot" && state.phase === "battle" && !document.querySelector(".announce")) {
+      scheduleBotShot();
+    }
   });
+}
+
+function sizeEndGrid(grid, view) {
+  const cell = Math.max(12, Math.min(28, Math.floor((view.clientWidth - 48) / state.width)));
+  grid.style.setProperty("--cell", `${cell}px`);
+  grid.style.setProperty("--label", "18px");
+  grid.style.setProperty("--cols", String(state.width));
+  grid.style.setProperty("--rows", String(state.height));
 }
 
 function renderEnd() {
   document.body.classList.remove("is-battle");
   const view = el("section", "end-screen");
   view.append(backLink());
-  view.append(codeLine(state.code));
+  if (!isBot()) view.append(codeLine(state.code));
   view.append(el("h1", "", state.outcome === "won" ? "Gewonnen" : "Verloren"));
-  const stats = ownShotStats(state);
-  view.append(el("p", "lead", `${stats.shots} eigene Schüsse · Trefferquote ${stats.rate} %`));
+  const mine = ownShotStats(state);
+  if (isBot()) {
+    const bot = incomingShotStats(state);
+    view.append(el("p", "lead", `Du: ${mine.shots} Schüsse · Trefferquote ${mine.rate} %`));
+    view.append(el("p", "lead", `Bot: ${bot.shots} Schüsse · Trefferquote ${bot.rate} %`));
+    view.append(el("h2", "", "Flotte des Bots"));
+    const botGrid = makeGrid("reveal-bot");
+    botGrid.classList.add("end-grid");
+    for (const button of botGrid.querySelectorAll(".cell")) button.disabled = true;
+    view.append(botGrid);
+    view.append(el("h2", "", "Mein Feld"));
+    const grid = makeGrid("reveal");
+    grid.classList.add("end-grid");
+    for (const button of grid.querySelectorAll(".cell")) button.disabled = true;
+    view.append(grid);
+    const rematch = el("button", "btn primary", "Revanche");
+    rematch.type = "button";
+    rematch.addEventListener("click", startRematch);
+    const fresh = el("button", "btn", "Neues Spiel");
+    fresh.type = "button";
+    fresh.addEventListener("click", startFresh);
+    const hub = el("a", "btn", "Zum Hub");
+    hub.href = "../../index.html";
+    const row = el("div", "btn-row");
+    row.append(rematch, fresh, hub);
+    view.append(row);
+    app.replaceChildren(view);
+    sizeEndGrid(botGrid, view);
+    sizeEndGrid(grid, view);
+    return;
+  }
+  view.append(el("p", "lead", `${mine.shots} eigene Schüsse · Trefferquote ${mine.rate} %`));
   view.append(el("h2", "", "Mein Feld"));
   const grid = makeGrid("reveal");
   grid.classList.add("end-grid");
@@ -911,11 +1223,7 @@ function renderEnd() {
   row.append(fresh, hub);
   view.append(row);
   app.replaceChildren(view);
-  const cell = Math.max(12, Math.min(28, Math.floor((view.clientWidth - 48) / state.width)));
-  grid.style.setProperty("--cell", `${cell}px`);
-  grid.style.setProperty("--label", "18px");
-  grid.style.setProperty("--cols", String(state.width));
-  grid.style.setProperty("--rows", String(state.height));
+  sizeEndGrid(grid, view);
 }
 
 let showingResume = false;
@@ -926,13 +1234,34 @@ function draw() {
     renderResumeScreen();
     return;
   }
-  if (state.phase === "setup") renderSettings();
+  if (state.phase === "setup" && !playMode) renderVersus();
+  else if (state.phase === "setup") renderSettings();
   else if (state.phase === "place") renderPlace();
   else if (state.phase === "battle") renderBattle();
   else renderEnd();
 }
 
 function render() {
+  showingResume = false;
+  draw();
+}
+
+function resumeFrom(which) {
+  const loaded = which === "bot" ? botSave : hotseatSave;
+  state = loaded;
+  playMode = which;
+  difficulty = state.difficulty || "medium";
+  extraShot = state.extraShot !== false;
+  if (state.rules) {
+    draft = {
+      mode: state.rules.mode,
+      width: state.rules.width,
+      height: state.rules.height,
+      allowTouch: !!state.rules.allowTouch,
+      counts: { ...state.rules.counts },
+    };
+    rememberCustom(draft);
+  }
   showingResume = false;
   draw();
 }
@@ -945,17 +1274,22 @@ function renderResumeScreen() {
   body.append(backLink());
   body.append(el("h1", "", "Schiffe versenken"));
   body.append(el("p", "lead", "Es gibt ein angefangenes Spiel auf diesem Handy."));
-  if (state.code) body.append(codeLine(state.code));
-  const resume = el("button", "btn primary", "Spiel fortsetzen");
-  resume.type = "button";
-  resume.addEventListener("click", () => {
-    showingResume = false;
-    draw();
-  });
+  if (isRunning(hotseatSave)) {
+    const resume = el("button", "btn primary", "Zuruf-Spiel fortsetzen");
+    resume.type = "button";
+    resume.addEventListener("click", () => resumeFrom("hotseat"));
+    dock.append(resume);
+  }
+  if (isRunning(botSave)) {
+    const resume = el("button", isRunning(hotseatSave) ? "btn" : "btn primary", "Bot-Spiel fortsetzen");
+    resume.type = "button";
+    resume.addEventListener("click", () => resumeFrom("bot"));
+    dock.append(resume);
+  }
   const fresh = el("button", "btn", "Neues Spiel");
   fresh.type = "button";
   fresh.addEventListener("click", startFresh);
-  dock.append(resume, fresh);
+  dock.append(fresh);
   view.append(body, dock);
   app.replaceChildren(view);
 }
@@ -964,13 +1298,28 @@ function boot() {
   document.title = "Schiffe versenken – Kajütenspiele";
   requestWakeLock();
   initUpdates();
-  const loaded = readSave(get(STORAGE_KEY, null));
-  state = loaded.state;
-  bootNotice = loaded.notice;
-  if (loaded.notice) set(STORAGE_KEY, freshState());
-  if (isRunning(state)) showingResume = true;
+  const hotseat = readSave(get(STORAGE_KEY, null));
+  const bot = readSave(get(BOT_KEY, null));
+  bootNotice = hotseat.notice || bot.notice;
+  if (hotseat.notice) set(STORAGE_KEY, freshState());
+  if (bot.notice) set(BOT_KEY, freshState());
+  hotseatSave = hotseat.notice ? null : hotseat.state;
+  botSave = bot.notice ? null : bot.state;
+  if (isRunning(hotseatSave) || isRunning(botSave)) {
+    showingResume = true;
+    state = isRunning(hotseatSave) ? hotseatSave : botSave;
+  } else {
+    state = freshState();
+  }
   draw();
 }
+
+window.kajueteSchiffeBotTest = (games = 200) => {
+  console.log(`Simuliere ${games} Partien je Schwierigkeit …`);
+  const result = benchmarkBots(games);
+  console.table(result);
+  return result;
+};
 
 window.addEventListener("resize", () => {
   if (state.phase === "battle" && !showingResume) {

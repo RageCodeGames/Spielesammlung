@@ -23,6 +23,10 @@ export function unlock() {
   return Promise.resolve(true);
 }
 
+export function getAudioContext() {
+  return ensureContext();
+}
+
 function onFirstTap() {
   unlock();
 }
@@ -50,6 +54,7 @@ export function playTone(options = {}) {
   const frequency = Number(options.frequency) > 0 ? Number(options.frequency) : 440;
   const duration = Number(options.duration) > 0 ? Number(options.duration) : 0.15;
   const type = options.type || "sine";
+  const volume = Number(options.gain) > 0 ? Math.min(Number(options.gain), 0.4) : 0.18;
 
   try {
     const osc = ctx.createOscillator();
@@ -61,7 +66,7 @@ export function playTone(options = {}) {
     osc.type = type;
     osc.frequency.setValueAtTime(frequency, now);
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.18, now + attack);
+    gain.gain.exponentialRampToValueAtTime(volume, now + attack);
     gain.gain.exponentialRampToValueAtTime(0.0001, end);
 
     osc.connect(gain);
