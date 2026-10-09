@@ -436,11 +436,14 @@ function askWhichShip(choice) {
 
 function renderSettings() {
   document.body.classList.remove("is-battle");
-  const view = el("section", "setup");
-  view.append(backLink());
-  view.append(el("h1", "", "Schiffe versenken"));
-  view.append(el("p", "lead", "Jeder spielt auf dem eigenen Handy. Die Schüsse ruft ihr euch zu."));
-  if (bootNotice) view.append(el("p", "note is-warn", bootNotice));
+  const view = el("section", "screen setup");
+  const body = el("div", "screen-body");
+  const dock = el("div", "screen-dock");
+
+  body.append(backLink());
+  body.append(el("h1", "", "Schiffe versenken"));
+  body.append(el("p", "lead", "Jeder spielt auf dem eigenen Handy. Die Schüsse ruft ihr euch zu."));
+  if (bootNotice) body.append(el("p", "note is-warn", bootNotice));
 
   const choices = el("div", "choices");
   for (const [id, title, detail] of MODES) {
@@ -471,18 +474,18 @@ function renderSettings() {
     render();
   });
 
-  view.append(choices, touch, codeLine(encodeRules(draft)));
+  body.append(choices, touch, codeLine(encodeRules(draft)));
   const codeButton = el("button", "btn", "Code eingeben");
   codeButton.type = "button";
   codeButton.addEventListener("click", askCode);
-  view.append(codeButton);
+  body.append(codeButton);
 
   if (draft.mode !== "custom") {
     const preview = el("div", "mini-ships");
     for (const shape of SHAPES) {
       for (let i = 0; i < (draft.counts[shape.id] || 0); i += 1) preview.append(shapeIcon(shape.id));
     }
-    view.append(preview);
+    body.append(preview);
   } else {
     const sizes = el("div", "stack");
     sizes.append(sizeStepper("Breite", draft.width, (value) => {
@@ -495,12 +498,12 @@ function renderSettings() {
       draft = rulesFor("custom", draft.allowTouch, { width: customWidth, height: customHeight, counts: customCounts });
       render();
     }, (value) => `${value} · 1–${value}`));
-    view.append(sizes);
+    body.append(sizes);
 
-    view.append(el("h2", "group-label", "Gerade"));
-    for (const shape of SHAPES.filter((item) => item.form === "gerade")) view.append(counter(shape));
-    view.append(el("h2", "group-label", "Gewinkelt"));
-    for (const shape of SHAPES.filter((item) => item.form !== "gerade")) view.append(counter(shape));
+    body.append(el("h2", "group-label", "Gerade"));
+    for (const shape of SHAPES.filter((item) => item.form === "gerade")) body.append(counter(shape));
+    body.append(el("h2", "group-label", "Gewinkelt"));
+    for (const shape of SHAPES.filter((item) => item.form !== "gerade")) body.append(counter(shape));
 
     const presetBox = el("div", "stack");
     presetBox.append(el("h2", "group-label", "Eigene Einstellungen"));
@@ -542,7 +545,7 @@ function renderSettings() {
       row.append(load, remove);
       presetBox.append(row);
     }
-    view.append(presetBox);
+    body.append(presetBox);
   }
 
   const note = el("p", "note", "Prüfe, ob die Flotte passt …");
@@ -556,7 +559,8 @@ function renderSettings() {
     save();
     render();
   });
-  view.append(note, next);
+  dock.append(note, next);
+  view.append(body, dock);
   app.replaceChildren(view);
   scheduleFit(note, next);
 }
@@ -935,11 +939,13 @@ function render() {
 
 function renderResumeScreen() {
   document.body.classList.remove("is-battle");
-  const view = el("section", "setup");
-  view.append(backLink());
-  view.append(el("h1", "", "Schiffe versenken"));
-  view.append(el("p", "lead", "Es gibt ein angefangenes Spiel auf diesem Handy."));
-  if (state.code) view.append(codeLine(state.code));
+  const view = el("section", "screen setup");
+  const body = el("div", "screen-body");
+  const dock = el("div", "screen-dock");
+  body.append(backLink());
+  body.append(el("h1", "", "Schiffe versenken"));
+  body.append(el("p", "lead", "Es gibt ein angefangenes Spiel auf diesem Handy."));
+  if (state.code) body.append(codeLine(state.code));
   const resume = el("button", "btn primary", "Spiel fortsetzen");
   resume.type = "button";
   resume.addEventListener("click", () => {
@@ -949,9 +955,8 @@ function renderResumeScreen() {
   const fresh = el("button", "btn", "Neues Spiel");
   fresh.type = "button";
   fresh.addEventListener("click", startFresh);
-  const stack = el("div", "stack");
-  stack.append(resume, fresh);
-  view.append(stack);
+  dock.append(resume, fresh);
+  view.append(body, dock);
   app.replaceChildren(view);
 }
 
