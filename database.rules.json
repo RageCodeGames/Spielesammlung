@@ -31,6 +31,15 @@
         }
       }
     },
+    "roomDraw": {
+      "$code": {
+        ".read": "auth != null",
+        ".write": "auth != null && ($code.matches(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/)) && (root.child('rooms/' + $code + '/meta/hostId').val() === auth.uid || (!root.child('rooms/' + $code).exists() && !newData.exists()))",
+        "$sid": {
+          ".write": "auth != null && (root.child('rooms/' + $code + '/meta/hostId').val() === auth.uid || ((!data.exists() && newData.child('from').val() === auth.uid) || (data.exists() && data.child('from').val() === auth.uid && (!newData.exists() || newData.child('from').val() === auth.uid))))"
+        }
+      }
+    },
     "roomSecrets": {
       "$code": {
         ".read": "auth != null && root.child('rooms/' + $code + '/meta/hostId').val() === auth.uid",

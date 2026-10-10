@@ -1,0 +1,205 @@
+body.malen {
+  --bg: #1a222e;
+  --bg-glow: #3a4a38;
+  --surface: #2a3444;
+  --surface-hover: #354258;
+  --text: #f4efe6;
+  --muted: #b7c2d2;
+  --accent: #e3a44a;
+  --accent-ink: #2a1c08;
+  --paper: #f7f1e6;
+}
+
+body.malen {
+  background:
+    radial-gradient(120% 55% at 50% -10%, var(--bg-glow) 0%, transparent 58%),
+    var(--bg);
+}
+
+.malen-hud {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.7rem;
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.malen-hud strong {
+  color: var(--text);
+}
+
+.malen-timer {
+  margin-left: auto;
+  font-size: 1.15rem;
+  color: var(--accent);
+}
+
+.malen-mask {
+  margin: 0;
+  text-align: center;
+  font-size: clamp(1.1rem, 4.5vw, 1.6rem);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  line-height: 1.35;
+}
+
+.malen-mask small {
+  display: block;
+  margin-top: 0.15rem;
+  letter-spacing: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.malen-banner {
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  border-radius: 0.85rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 800;
+  text-align: center;
+}
+
+.malen-banner.wait {
+  background: var(--surface);
+  color: var(--text);
+  border: 2px solid #6a7a52;
+}
+
+.malen-stage {
+  width: 100%;
+  max-width: 36rem;
+  margin: 0 auto;
+  aspect-ratio: 4 / 3;
+  max-height: min(52dvh, 28rem);
+  border-radius: 0.9rem;
+  overflow: hidden;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+  touch-action: none;
+}
+
+.malen-stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.malen-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.malen-colors,
+.malen-widths,
+.malen-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.malen-swatch,
+.malen-width {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.malen-swatch.is-on,
+.malen-width.is-on {
+  border-color: var(--accent);
+}
+
+.malen-width {
+  display: grid;
+  place-items: center;
+  background: var(--surface);
+}
+
+.malen-width i {
+  display: block;
+  border-radius: 999px;
+  background: var(--text);
+}
+
+.malen-guesses {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 7rem;
+  overflow: auto;
+  font-size: 0.88rem;
+}
+
+.malen-guesses li {
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.5rem;
+  background: #222a36;
+}
+
+.malen-guesses strong {
+  margin-right: 0.35rem;
+}
+
+.malen-form {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.malen-form .text-input {
+  flex: 1;
+}
+
+.malen-picks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.malen-scores {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.malen-score {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.45rem 0.7rem;
+  border-radius: 0.8rem;
+  background: var(--surface);
+  font-weight: 700;
+}
+
+.malen-score.is-up {
+  outline: 2px solid var(--accent);
+}
+
+.malen-rank {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 0.9rem;
+  background: var(--surface);
+}
+
+.malen-rank span {
+  color: var(--muted);
+  font-weight: 800;
+  width: 1.5rem;
+}

@@ -40,4 +40,12 @@ export const games = [
     href: "./games/tempel/index.html",
     available: true,
   },
+  {
+    id: "malen",
+    name: "Malen & Raten",
+    description: "Zeichnen und erraten, jedes Handy für sich.",
+    emoji: "✏️",
+    href: "./games/malen/index.html",
+    available: true,
+  },
 ];

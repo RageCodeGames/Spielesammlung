@@ -40,14 +40,17 @@ let unsubRoom = null;
 let unsubActions = null;
 let unsubInfo = null;
 let unsubSecrets = null;
+let unsubDraw = null;
 let lastSnapshot = null;
 let lastSecrets = null;
+let lastDraw = null;
 const pendingActions = [];
 
 const roomListeners = new Set();
 const actionListeners = new Set();
 const connectionListeners = new Set();
 const secretListeners = new Set();
+const drawListeners = new Set();
 
 function rememberPlayerId(id) {
   uid = id;
@@ -387,6 +390,40 @@ function detachSecretListener() {
   }
 }
 
+function emitDraw(payload) {
+  lastDraw = payload;
+  for (const cb of drawListeners) {
+    try {
+      cb(payload);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+}
+
+function detachDrawListener() {
+  if (unsubDraw) {
+    unsubDraw();
+    unsubDraw = null;
+  }
+}
+
+function listenToDraw(code) {
+  detachDrawListener();
+  if (!fb?.dbMod || !db || !code) return;
+  const { ref, onValue } = fb.dbMod;
+  unsubDraw = onValue(
+    ref(db, `roomDraw/${code}`),
+    (snap) => {
+      const val = snap.val();
+      emitDraw(val && typeof val === "object" && !Array.isArray(val) ? val : {});
+    },
+    (err) => {
+      console.error("[online] Zeichnung", err);
+    }
+  );
+}
+
 function listenToSecrets(code) {
   detachSecretListener();
   if (!fb?.dbMod || !db || !uid || !code) return;
@@ -419,6 +456,7 @@ function detachRoomListeners() {
     unsubActions = null;
   }
   detachSecretListener();
+  detachDrawListener();
   pendingActions.length = 0;
 }
 
@@ -445,6 +483,7 @@ function listenToRoom(code) {
     const hostChanged = hostId !== snapshot.hostId;
     hostId = snapshot.hostId;
     if (hostChanged || !unsubSecrets) listenToSecrets(code);
+    if (!unsubDraw) listenToDraw(code);
     if (uid && !snapshot.players.some((p) => p.isSelf)) {
       emitRoom({ ...snapshot, status: "kicked" });
       leaveRoom({ kicked: true }).catch(() => {});
@@ -614,6 +653,7 @@ function clearLocalRoom({ keepSession = false } = {}) {
   hostId = null;
   lastSnapshot = null;
   lastSecrets = null;
+  lastDraw = null;
   if (!keepSession) clearSession();
 }
 
@@ -621,6 +661,7 @@ async function deleteRoomData(code) {
   if (!code || !fb?.dbMod || !db) return;
   const { ref, remove } = fb.dbMod;
   await remove(ref(db, `roomSecrets/${code}`));
+  await remove(ref(db, `roomDraw/${code}`));
   await remove(ref(db, `rooms/${code}`));
   await remove(ref(db, `roomIndex/${code}`));
 }
@@ -755,6 +796,60 @@ export function onSecrets(callback) {
   secretListeners.add(callback);
   if (lastSecrets !== null) callback(lastSecrets);
   return () => secretListeners.delete(callback);
+}
+
+/** Live-Zeichnung: Objekt mit Strich-IDs, keine Arrays. */
+export function onDraw(callback) {
+  drawListeners.add(callback);
+  if (lastDraw !== null) callback(lastDraw);
+  return () => drawListeners.delete(callback);
+}
+
+function drawStrokeId(id) {
+  return String(id || "")
+    .replace(/[^\w-]/g, "")
+    .slice(0, 48);
+}
+
+/** Maler schreibt einen Strich oder neue Punkte. `patch` wird per update gemischt. */
+export async function writeDrawStroke(id, patch) {
+  try {
+    await initOnline();
+    if (!roomCode || !uid) fail("no-room", "Kein Raum.");
+    const sid = drawStrokeId(id);
+    if (!sid) fail("bad-stroke", "Ungültiger Strich.");
+    const { ref, update } = fb.dbMod;
+    const data = jsonSafe({ ...(patch && typeof patch === "object" ? patch : {}), from: uid });
+    await update(ref(db, `roomDraw/${roomCode}/${sid}`), data);
+  } catch (err) {
+    rethrow(err);
+  }
+}
+
+export async function removeDrawStroke(id) {
+  try {
+    await initOnline();
+    if (!roomCode || !uid) fail("no-room", "Kein Raum.");
+    const sid = drawStrokeId(id);
+    if (!sid) return;
+    const { ref, remove } = fb.dbMod;
+    await remove(ref(db, `roomDraw/${roomCode}/${sid}`));
+  } catch (err) {
+    rethrow(err);
+  }
+}
+
+/** Host löscht die Zeichnung nach der Runde. */
+export async function clearDraw() {
+  try {
+    await initOnline();
+    if (!roomCode) fail("no-room", "Kein Raum.");
+    if (!isHost()) fail("not-host", "Nur der Host löscht die Zeichnung.");
+    const { ref, remove } = fb.dbMod;
+    await remove(ref(db, `roomDraw/${roomCode}`));
+  } catch (err) {
+    rethrow(err);
+  }
 }
 
 export async function writeAllSecrets(map) {

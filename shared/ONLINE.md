@@ -93,5 +93,10 @@ Während eines laufenden Spiels, je nach Spiel:
 - **Schiffe versenken:** der andere gewinnt kampflos („Gegner hat das Spiel verlassen“).
 - **Tapper:** der Spieler fliegt aus der Reihenfolge; bei weniger als 2 Spielern endet die Runde.
 - **Tempelgold:** die Runde kann nicht weitergehen. Ende mit Hinweis und aufgedeckten Rollen.
+- **Malen & Raten:** der Spieler fliegt raus; malt er gerade, wird die Runde übersprungen. Bei weniger als 3 Spielern endet das Spiel.
 
 Spiele rufen `closeRoom()` (Host) bzw. `leavePlay()` (Mitspieler) auf; die Lobby nutzt dieselben Bestätigungen.
+
+## Zeichnungen (Malen & Raten)
+
+Live-Striche liegen unter `roomDraw/$code/$sid` (Objekt-Schlüssel, keine Arrays). Der Maler schreibt die eigenen Striche, der Host löscht sie nach der Runde. Der gesuchte Begriff steht in `roomSecrets`, nicht im öffentlichen Spielzustand.
