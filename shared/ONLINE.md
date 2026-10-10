@@ -80,3 +80,18 @@ mountLobby(app, {
 - `onStart` / Render nach Statuswechsel: try/catch mit sichtbarer Fehlermeldung
 
 Offline-Spiele dürfen Firebase nicht laden, solange der Online-Modus nicht gewählt ist.
+
+## Raum schließen und verlassen
+
+In der Lobby und während des Spiels (⋯-Menü):
+
+- **Host:** „Raum schließen“ (mit Bestätigung). Das Spiel endet für alle, Mitspieler sehen „Der Host hat den Raum geschlossen“ und landen auf dem Startbildschirm des Spiels. `rooms`, `roomIndex` und `roomSecrets` werden gelöscht. Die gespeicherte Sitzung ebenfalls – kein automatisches Wiederbeitreten.
+- **Mitspieler:** „Raum verlassen“ (mit Bestätigung). Der Spieler verschwindet aus der Liste, die anderen sehen „Anna hat den Raum verlassen“. Sitzung wird gelöscht.
+
+Während eines laufenden Spiels, je nach Spiel:
+
+- **Schiffe versenken:** der andere gewinnt kampflos („Gegner hat das Spiel verlassen“).
+- **Tapper:** der Spieler fliegt aus der Reihenfolge; bei weniger als 2 Spielern endet die Runde.
+- **Tempelgold:** die Runde kann nicht weitergehen. Ende mit Hinweis und aufgedeckten Rollen.
+
+Spiele rufen `closeRoom()` (Host) bzw. `leavePlay()` (Mitspieler) auf; die Lobby nutzt dieselben Bestätigungen.

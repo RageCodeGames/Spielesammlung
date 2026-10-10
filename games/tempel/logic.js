@@ -25,22 +25,107 @@ export function shuffle(list, rng = Math.random) {
   return next;
 }
 
-export function countsFromPile(pile) {
-  const counts = { gold: 0, falle: 0, leer: 0 };
-  for (const type of Object.values(pile || {})) {
-    if (counts[type] != null) counts[type] += 1;
+const CARD_TYPES = new Set(["gold", "falle", "leer"]);
+
+export function emptyCounts() {
+  return { gold: 0, falle: 0, leer: 0 };
+}
+
+export function countsFromHand(hand) {
+  const counts = emptyCounts();
+  for (const card of hand || []) {
+    if (CARD_TYPES.has(card.type)) counts[card.type] += 1;
   }
   return counts;
 }
 
-export function normalizeSecret(raw) {
-  const pile = {};
-  const src = raw?.pile && typeof raw.pile === "object" ? raw.pile : {};
-  for (const [id, type] of Object.entries(src)) {
-    if (type === "gold" || type === "falle" || type === "leer") pile[id] = type;
+export function countsFromPile(pile) {
+  return countsFromHand(handFromRaw({ pile, hand: pile }));
+}
+
+function cardType(value) {
+  return CARD_TYPES.has(value) ? value : null;
+}
+
+function cardsFromList(list) {
+  const hand = [];
+  const items = Array.isArray(list)
+    ? list
+    : list && typeof list === "object"
+      ? Object.values(list)
+      : [];
+  for (const card of items) {
+    const type = cardType(typeof card === "string" ? card : card?.type);
+    const id = card?.id != null ? String(card.id) : "";
+    if (id && type) hand.push({ id, type });
   }
-  const role = raw?.role === "waechterin" || raw?.role === "abenteurer" ? raw.role : null;
-  return { role, pile, counts: countsFromPile(pile) };
+  return hand;
+}
+
+/** Verdeckte Karten als dichte Liste – Firebase-sicher, ohne Lücken. */
+export function handFromRaw(raw) {
+  if (!raw || typeof raw !== "object") return [];
+  if (raw.hand != null) return cardsFromList(raw.hand);
+  const pile = raw.pile;
+  if (pile == null) return [];
+  if (Array.isArray(pile)) return cardsFromList(pile);
+  if (typeof pile === "object") {
+    const asList = cardsFromList(pile);
+    if (asList.length) return asList;
+    const hand = [];
+    for (const [id, type] of Object.entries(pile)) {
+      const kind = cardType(type);
+      if (kind) hand.push({ id: String(id), type: kind });
+    }
+    return hand;
+  }
+  return [];
+}
+
+function pileFromHand(hand) {
+  const pile = {};
+  for (const card of hand) pile[card.id] = card.type;
+  return pile;
+}
+
+export function syncSecret(secret) {
+  const role = secret?.role === "waechterin" || secret?.role === "abenteurer" ? secret.role : null;
+  const hand = Array.isArray(secret?.hand)
+    ? secret.hand.filter((card) => card?.id && CARD_TYPES.has(card.type)).map((card) => ({ id: String(card.id), type: card.type }))
+    : handFromRaw(secret);
+  const counts = countsFromHand(hand);
+  return {
+    role,
+    hand,
+    pile: pileFromHand(hand),
+    counts,
+    hidden: hand.length,
+  };
+}
+
+export function normalizeSecret(raw) {
+  return syncSecret(raw);
+}
+
+/** Vor dem Schreiben: Zählfelder immer gesetzt, leere Hand weglassen. */
+export function packSecrets(secrets) {
+  const out = {};
+  for (const [id, raw] of Object.entries(secrets || {})) {
+    const secret = syncSecret(raw);
+    const packed = {
+      role: secret.role,
+      hidden: secret.hidden,
+      gold: secret.counts.gold,
+      falle: secret.counts.falle,
+      leer: secret.counts.leer,
+    };
+    if (secret.hand.length) {
+      packed.hand = secret.hand.map((card) => ({ id: card.id, type: card.type }));
+      packed.pile = secret.pile;
+    }
+    out[id] = packed;
+  }
+  return out;
 }
 
 export function normalizeSecrets(raw) {
@@ -86,6 +171,8 @@ export function migrateState(data) {
       trapTotal: 0,
       leftoverRole: false,
       winner: null,
+      endReason: null,
+      leftName: null,
       keyHolderId: null,
       revealSeq: 0,
       lastReveal: null,
@@ -94,11 +181,20 @@ export function migrateState(data) {
   next.players = readArray(next.players).map((player) => ({
     id: player.id,
     name: player.name || "Spieler",
-    hasClaim: !!player.hasClaim,
-    claimGold: player.hasClaim ? Number(player.claimGold) || 0 : 0,
-    claimFalle: player.hasClaim ? Number(player.claimFalle) || 0 : 0,
+    claim: normalizeClaim(player.claim),
     cards: normalizeCards(player.cards),
   }));
+  next.roundLog = readArray(next.roundLog)
+    .filter((row) => row && Number(row.round))
+    .map((row) => ({
+      round: Number(row.round),
+      cardsPerHand: Number(row.cardsPerHand) || 0,
+      entries: readArray(row.entries).map((entry) => ({
+        name: entry?.name || "Spieler",
+        claim: normalizeClaim(entry?.claim),
+        shown: normalizeShown(entry?.shown),
+      })),
+    }));
   next.log = readArray(next.log)
     .filter((row) => row && row.type)
     .map((row) => ({
@@ -113,6 +209,64 @@ export function migrateState(data) {
     next.lastReveal = { ...next.lastReveal };
   } else next.lastReveal = null;
   return next;
+}
+
+export function normalizeClaim(raw) {
+  if (!raw || typeof raw !== "object" || raw.set !== true) return null;
+  const role = raw.role === "abenteurer" || raw.role === "waechterin" ? raw.role : null;
+  return {
+    set: true,
+    role,
+    gold: Math.max(0, Math.floor(Number(raw.gold) || 0)),
+    falle: Math.max(0, Math.floor(Number(raw.falle) || 0)),
+  };
+}
+
+function normalizeShown(raw) {
+  return {
+    gold: Math.max(0, Number(raw?.gold) || 0),
+    falle: Math.max(0, Number(raw?.falle) || 0),
+    leer: Math.max(0, Number(raw?.leer) || 0),
+  };
+}
+
+/** Was in dieser Runde bei einem Spieler schon aufgedeckt wurde. */
+export function shownCounts(player) {
+  const counts = { gold: 0, falle: 0, leer: 0 };
+  for (const card of Object.values(player?.cards || {})) {
+    if (card?.shown && counts[card.type] != null) counts[card.type] += 1;
+  }
+  return counts;
+}
+
+export function claimText(claim, cardsPerHand) {
+  if (!claim) return "keine Ansage";
+  const parts = [];
+  if (claim.role) parts.push(ROLE_LABEL[claim.role]);
+  const empty = Math.max(0, cardsPerHand - claim.gold - claim.falle);
+  parts.push(`${claim.gold} Gold`, `${claim.falle} ${claim.falle === 1 ? "Falle" : "Fallen"}`, `${empty} leer`);
+  return parts.join(" · ");
+}
+
+export function shownText(shown) {
+  const parts = [];
+  if (shown.gold) parts.push(`${shown.gold} Gold`);
+  if (shown.falle) parts.push(`${shown.falle} ${shown.falle === 1 ? "Falle" : "Fallen"}`);
+  if (shown.leer) parts.push(`${shown.leer} leer`);
+  return parts.length ? parts.join(" · ") : "nichts";
+}
+
+function snapshotRound(state) {
+  const entry = {
+    round: state.round,
+    cardsPerHand: state.cardsPerHand,
+    entries: state.players.map((player) => ({
+      name: player.name,
+      claim: player.claim || null,
+      shown: shownCounts(player),
+    })),
+  };
+  state.roundLog = [...(state.roundLog || []).filter((row) => row.round !== state.round), entry];
 }
 
 export function cardList(player) {
@@ -132,13 +286,20 @@ function clampInt(value, min, max) {
 function cloneSecrets(secrets) {
   const out = {};
   for (const [id, secret] of Object.entries(secrets || {})) {
-    out[id] = {
-      role: secret.role,
-      pile: { ...(secret.pile || {}) },
-      counts: { ...(secret.counts || { gold: 0, falle: 0, leer: 0 }) },
-    };
+    out[id] = syncSecret(secret);
   }
   return out;
+}
+
+function typeOfSecretCard(secret, cardId) {
+  const synced = syncSecret(secret);
+  return synced.pile[cardId] || synced.hand.find((card) => card.id === cardId)?.type || null;
+}
+
+function removeSecretCard(secret, cardId) {
+  const next = syncSecret(secret);
+  next.hand = next.hand.filter((card) => card.id !== cardId);
+  return syncSecret(next);
 }
 
 function publishRoles(state, secrets) {
@@ -155,27 +316,24 @@ function dealPiles(players, types, cardsEach, seqStart) {
   let seq = seqStart;
   let offset = 0;
   for (const player of players) {
-    const pile = {};
+    const hidden = [];
     const cards = {};
-    const hand = types.slice(offset, offset + cardsEach);
+    const typesForPlayer = types.slice(offset, offset + cardsEach);
     offset += cardsEach;
-    for (const type of hand) {
+    for (const type of typesForPlayer) {
       const id = `c${seq}`;
       seq += 1;
-      pile[id] = type;
+      hidden.push({ id, type });
       cards[id] = { shown: false };
     }
-    secrets[player.id] = {
+    secrets[player.id] = syncSecret({
       role: player.role,
-      pile,
-      counts: countsFromPile(pile),
-    };
+      hand: hidden,
+    });
     publicPlayers.push({
       id: player.id,
       name: player.name,
-      hasClaim: false,
-      claimGold: 0,
-      claimFalle: 0,
+      claim: null,
       cards,
     });
   }
@@ -209,7 +367,7 @@ export function beginMatch(playersInput, rng = Math.random) {
   const seated = players.map((player, i) => ({ ...player, role: assigned[i] }));
   const dealt = dealPiles(seated, deck, 5, 1);
   const keyHolderId = seated[Math.floor(rng() * n)].id;
-  return {
+  const match = {
     state: {
       version: 1,
       phase: "play",
@@ -227,26 +385,39 @@ export function beginMatch(playersInput, rng = Math.random) {
       revealSeq: 0,
       lastReveal: null,
       log: [],
+      roundLog: [],
       players: dealt.publicPlayers,
       roles: null,
     },
     secrets: dealt.secrets,
   };
+  auditHands(match.state, match.secrets, "austeilen");
+  return match;
 }
 
-export function applyClaim(state, playerId, gold, falle) {
+/** input: { role, gold, falle } oder null zum Löschen */
+export function applyClaim(state, playerId, input) {
   if (state.phase !== "play") return { state, error: "Ansage gerade nicht möglich." };
   const next = clone(state);
   const player = next.players.find((row) => row.id === playerId);
   if (!player) return { state, error: "Unbekannter Spieler." };
+  if (!input) {
+    player.claim = null;
+    return { state: next, error: null };
+  }
   const max = next.cardsPerHand;
-  player.hasClaim = true;
-  player.claimGold = clampInt(gold, 0, max);
-  player.claimFalle = clampInt(falle, 0, max);
+  const gold = clampInt(input.gold, 0, max);
+  const falle = clampInt(input.falle, 0, max);
+  if (gold + falle > max) {
+    return { state, error: `Gold und Fallen zusammen höchstens ${max}.` };
+  }
+  const role = input.role === "abenteurer" || input.role === "waechterin" ? input.role : null;
+  player.claim = { set: true, role, gold, falle };
   return { state: next, error: null };
 }
 
 function finishRound(state, secrets, rng) {
+  snapshotRound(state);
   if (state.round >= ROUND_COUNT) {
     state.phase = "end";
     state.winner = "waechterinnen";
@@ -255,11 +426,8 @@ function finishRound(state, secrets, rng) {
   }
   const remaining = [];
   for (const player of state.players) {
-    for (const [id, card] of Object.entries(player.cards || {})) {
-      if (card.shown) continue;
-      const type = secrets[player.id]?.pile?.[id];
-      if (type) remaining.push(type);
-    }
+    const hand = syncSecret(secrets[player.id]).hand;
+    for (const card of hand) remaining.push(card.type);
   }
   const nextRound = state.round + 1;
   const each = cardsPerHand(nextRound);
@@ -282,6 +450,7 @@ function finishRound(state, secrets, rng) {
   state.cardsPerHand = each;
   state.revealsDone = 0;
   state.players = dealt.publicPlayers;
+  auditHands(state, dealt.secrets, `runde ${state.round}`);
   return { state, secrets: dealt.secrets, error: null };
 }
 
@@ -299,13 +468,12 @@ export function applyReveal(state, secrets, actorId, ownerId, cardId, rng = Math
   const card = owner.cards?.[cardId];
   if (!card) return { state, secrets, error: "Diese Karte gibt es nicht." };
   if (card.shown) return { state, secrets, error: "Die Karte ist schon offen." };
-  const type = nextSecrets[ownerId]?.pile?.[cardId];
+  const type = typeOfSecretCard(nextSecrets[ownerId], cardId);
   if (!type) return { state, secrets, error: "Karte nicht gefunden." };
 
   card.shown = true;
   card.type = type;
-  delete nextSecrets[ownerId].pile[cardId];
-  nextSecrets[ownerId].counts = countsFromPile(nextSecrets[ownerId].pile);
+  nextSecrets[ownerId] = removeSecretCard(nextSecrets[ownerId], cardId);
   next.revealsDone += 1;
   next.revealSeq += 1;
   next.keyHolderId = ownerId;
@@ -330,12 +498,14 @@ export function applyReveal(state, secrets, actorId, ownerId, cardId, rng = Math
   if (type === "falle") next.trapFound += 1;
 
   if (next.goldFound >= next.goldTotal) {
+    snapshotRound(next);
     next.phase = "end";
     next.winner = "abenteurer";
     publishRoles(next, nextSecrets);
     return { state: next, secrets: nextSecrets, error: null };
   }
   if (next.trapFound >= next.trapTotal) {
+    snapshotRound(next);
     next.phase = "end";
     next.winner = "waechterinnen";
     publishRoles(next, nextSecrets);
@@ -344,15 +514,74 @@ export function applyReveal(state, secrets, actorId, ownerId, cardId, rng = Math
   if (next.revealsDone >= next.revealsNeed) {
     return finishRound(next, nextSecrets, rng);
   }
+  auditHands(next, nextSecrets, "aufdecken");
   return { state: next, secrets: nextSecrets, error: null };
 }
 
-export function randomClaim(player, rng = Math.random) {
-  const n = faceDownCards(player).length;
-  return {
-    gold: Math.floor(rng() * (n + 1)),
-    falle: Math.floor(rng() * (n + 1)),
-  };
+export function applyAbort(state, secrets, leaver) {
+  const next = clone(state);
+  const nextSecrets = cloneSecrets(secrets);
+  snapshotRound(next);
+  next.phase = "end";
+  next.winner = null;
+  next.endReason = "left";
+  next.leftName = leaver?.name || "Jemand";
+  publishRoles(next, nextSecrets);
+  return { state: next, secrets: nextSecrets, error: null };
+}
+
+export function auditHands(state, secrets, where = "") {
+  if (!state?.players) return true;
+  let ok = true;
+  const tag = `[tempel] Summen${where ? ` (${where})` : ""}`;
+  for (const player of state.players) {
+    if (!secrets || !Object.prototype.hasOwnProperty.call(secrets, player.id)) continue;
+    const hiddenCards = faceDownCards(player);
+    const shown = shownCounts(player);
+    const shownSum = shown.gold + shown.falle + shown.leer;
+    const secret = syncSecret(secrets[player.id]);
+    const countSum = secret.counts.gold + secret.counts.falle + secret.counts.leer;
+    if (state.phase === "play" && hiddenCards.length + shownSum !== state.cardsPerHand) {
+      console.warn(tag, player.name, "Rundenkarten", {
+        verdeckt: hiddenCards.length,
+        aufgedeckt: shownSum,
+        runde: state.cardsPerHand,
+      });
+      ok = false;
+    }
+    if (secret.hand.length !== hiddenCards.length || countSum !== hiddenCards.length || secret.hidden !== hiddenCards.length) {
+      console.warn(tag, player.name, "verdeckt ≠ geheim", {
+        ruecken: hiddenCards.length,
+        hand: secret.hand.length,
+        counts: secret.counts,
+        hidden: secret.hidden,
+      });
+      ok = false;
+    }
+    const publicIds = new Set(hiddenCards.map((card) => card.id));
+    const secretIds = new Set(secret.hand.map((card) => card.id));
+    for (const id of publicIds) {
+      if (!secretIds.has(id)) {
+        console.warn(tag, player.name, "öffentliche Karte fehlt geheim", id);
+        ok = false;
+      }
+    }
+    for (const id of secretIds) {
+      if (!publicIds.has(id)) {
+        console.warn(tag, player.name, "geheime Karte nicht verdeckt", id);
+        ok = false;
+      }
+    }
+  }
+  return ok;
+}
+
+export function randomClaim(cardsPerHand, rng = Math.random) {
+  const gold = Math.floor(rng() * (cardsPerHand + 1));
+  const falle = Math.floor(rng() * (cardsPerHand - gold + 1));
+  const roll = rng();
+  const role = roll < 0.45 ? "abenteurer" : roll < 0.7 ? "waechterin" : null;
+  return { role, gold, falle };
 }
 
 export function randomTarget(state, actorId, rng = Math.random) {
@@ -367,7 +596,8 @@ export function randomTarget(state, actorId, rng = Math.random) {
   return options[Math.floor(rng() * options.length)];
 }
 
-export function winnerTitle(winner) {
+export function winnerTitle(winner, reason) {
+  if (reason === "left" || !winner) return "Runde abgebrochen";
   return winner === "abenteurer" ? "Die Abenteurer gewinnen" : "Die Wächterinnen gewinnen";
 }
 

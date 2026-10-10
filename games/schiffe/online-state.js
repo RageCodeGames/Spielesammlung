@@ -319,6 +319,20 @@ export function applyUnready(state, playerId) {
   return next;
 }
 
+export function applyForfeit(state, leaverId) {
+  if (!state || state.phase === "end") return { state, error: null };
+  const winner = opponentId(state, leaverId);
+  if (!winner) return { state, error: null };
+  const next = cloneOnline(state);
+  next.phase = "end";
+  next.winnerId = winner;
+  next.turnPlayerId = null;
+  next.endReason = "left";
+  next.leftId = leaverId;
+  next.leftName = next.playerNames?.[leaverId] || "Gegner";
+  return { state: next, error: null };
+}
+
 export function fireOnlineShot(state, shooterId, c, r) {
   if (state.phase !== "battle") return { state, result: "ignore" };
   if (state.turnPlayerId !== shooterId) return { state, result: "ignore" };

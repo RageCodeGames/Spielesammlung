@@ -14,6 +14,8 @@ import {
   mountConnectionBadge,
   onConnectionChange,
   onRoomChange,
+  isRoomGone,
+  playersWhoLeft,
   setPlayerOrder,
   startGame,
   updateSettings,
@@ -46,6 +48,85 @@ async function copyText(text) {
       return false;
     }
   }
+}
+
+export function confirmChoice({ message, yes = "OK", no = "Abbrechen" }) {
+  return new Promise((resolve) => {
+    const back = el("div", "dialog-back");
+    const dialog = el("div", "dialog");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.append(el("p", "", message));
+    const yesBtn = el("button", "btn primary", yes);
+    yesBtn.type = "button";
+    const noBtn = el("button", "btn", no);
+    noBtn.type = "button";
+    const finish = (value) => {
+      back.remove();
+      resolve(value);
+    };
+    yesBtn.addEventListener("click", () => finish(true));
+    noBtn.addEventListener("click", () => finish(false));
+    back.addEventListener("click", (event) => {
+      if (event.target === back) finish(false);
+    });
+    dialog.append(yesBtn, noBtn);
+    back.append(dialog);
+    document.body.append(back);
+    yesBtn.focus();
+  });
+}
+
+export function confirmRoomExit(isHost) {
+  return confirmChoice({
+    message: isHost
+      ? "Raum schließen? Das Spiel endet für alle, der Raum wird gelöscht."
+      : "Raum verlassen? Du bist danach nicht mehr in dieser Runde.",
+    yes: isHost ? "Raum schließen" : "Raum verlassen",
+  });
+}
+
+/** Dezentes ⋯-Menü zum Schließen/Verlassen während des Spiels. */
+export function appendRoomMenu(parent, { isHost, onExit }) {
+  if (!parent) return;
+  const box = el("div", "room-menu");
+  const toggle = el("button", "btn room-menu-btn", "⋯");
+  toggle.type = "button";
+  toggle.setAttribute("aria-haspopup", "true");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.setAttribute("aria-label", isHost ? "Raum-Menü" : "Raum-Menü");
+  toggle.title = "Mehr";
+  const pop = el("div", "room-menu-pop");
+  pop.hidden = true;
+  const action = el("button", "btn", isHost ? "Raum schließen" : "Raum verlassen");
+  action.type = "button";
+  let onDoc = null;
+  const closePop = () => {
+    pop.hidden = true;
+    toggle.setAttribute("aria-expanded", "false");
+    if (onDoc) {
+      document.removeEventListener("click", onDoc);
+      onDoc = null;
+    }
+  };
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!pop.hidden) {
+      closePop();
+      return;
+    }
+    pop.hidden = false;
+    toggle.setAttribute("aria-expanded", "true");
+    onDoc = () => closePop();
+    window.setTimeout(() => document.addEventListener("click", onDoc), 0);
+  });
+  action.addEventListener("click", () => {
+    closePop();
+    onExit?.();
+  });
+  pop.append(action);
+  box.append(toggle, pop);
+  parent.append(box);
 }
 
 function errorMessage(err) {
@@ -119,9 +200,29 @@ export function mountLobby(root, options = {}) {
   root.append(screen);
 
   const unsubRoom = onRoomChange((next) => {
-    snapshot = next;
     if (destroyed) return;
+    if (started) {
+      snapshot = next;
+      return;
+    }
     if (busy && !next) return;
+    if (snapshot && isRoomGone(next)) {
+      snapshot = next?.status === "kicked" || next?.status === "closed"
+        ? next
+        : { ...snapshot, status: "closed", state: null };
+      render();
+      return;
+    }
+    let leaveNote = "";
+    if (snapshot && next) {
+      const leavers = playersWhoLeft(snapshot, next);
+      if (leavers.length) {
+        leaveNote = leavers.length === 1
+          ? `${leavers[0].name} hat den Raum verlassen`
+          : leavers.map((player) => player.name).join(", ") + " haben den Raum verlassen";
+      }
+    }
+    snapshot = next;
     if (next?.status === "playing" && !started) {
       started = true;
       try {
@@ -137,9 +238,11 @@ export function mountLobby(root, options = {}) {
     if (finger && finger === lastRoomFinger && body.querySelector(".lobby-code")) {
       const sum = body.querySelector(".lobby-settings-sum");
       if (sum && settingsPanel?.summarize) sum.textContent = settingsPanel.summarize(next.settings || {});
+      if (leaveNote) hint(leaveNote);
       return;
     }
     render();
+    if (leaveNote) hint(leaveNote);
   });
 
   const unsubNet = onConnectionChange(() => {
@@ -355,6 +458,9 @@ export function mountLobby(root, options = {}) {
   }
 
   async function onExit() {
+    const host = Boolean(snapshot?.you?.isHost);
+    const ok = await confirmRoomExit(host);
+    if (!ok || destroyed) return;
     try {
       await leaveRoom();
     } catch (err) {
@@ -578,6 +684,20 @@ export function mountLobby(root, options = {}) {
 
     appendHint();
 
+    if (room.status === "closed") {
+      body.append(el("p", "note is-bad", "Der Host hat den Raum geschlossen"));
+      const ok = el("button", "btn primary", "OK");
+      ok.type = "button";
+      ok.addEventListener("click", () => {
+        snapshot = null;
+        entryStep = "choice";
+        onLeave?.();
+        render();
+      });
+      dock.append(ok);
+      return;
+    }
+
     if (room.status === "kicked") {
       body.append(el("p", "note is-bad", "Du wurdest entfernt."));
       const ok = el("button", "btn primary", "OK");
@@ -602,7 +722,7 @@ export function mountLobby(root, options = {}) {
       startBtn.addEventListener("click", onStartClick);
       dock.append(startBtn);
     }
-    const leaveBtn = el("button", "btn", host ? "Raum schließen" : "Verlassen");
+    const leaveBtn = el("button", "btn", host ? "Raum schließen" : "Raum verlassen");
     leaveBtn.type = "button";
     leaveBtn.addEventListener("click", onExit);
     dock.append(leaveBtn);

@@ -2,16 +2,23 @@ import { MIN_PLAYERS, MAX_PLAYERS, ROUND_COUNT, tableTotalsMatch } from "./rules
 import {
   ROLE_LABEL,
   TYPE_LABEL,
+  applyAbort,
   applyClaim,
   applyReveal,
+  auditHands,
   beginMatch,
   cardList,
+  claimText,
+  faceDownCards,
   logLine,
   migrateState,
   normalizeSecret,
   normalizeSecrets,
+  packSecrets,
   randomClaim,
   randomTarget,
+  shownCounts,
+  shownText,
   winnerTitle,
 } from "./logic.js";
 import { playTone, unlock } from "../../shared/sound.js";
@@ -26,7 +33,7 @@ const RULES_TEXT = [
   "Die Abenteurer wollen alles Gold aufdecken. Die Wächterinnen wollen das verhindern: entweder indem alle Feuerfallen gefunden werden, oder indem nach der letzten Runde noch Gold versteckt ist.",
   "Zu Beginn jeder Runde bekommt jeder Kammerkarten. Du siehst nur die Anzahlen (Gold, Fallen, leer), nicht die Reihenfolge. Die Karten liegen verdeckt vor dir.",
   "Wer den Schlüssel hat, öffnet eine verdeckte Karte bei jemand anderem. Alle sehen das Ergebnis, danach hat die Person den Schlüssel. Pro Runde gibt es so viele Öffnungen wie Mitspielende. Offene Karten verlassen den Tempel, der Rest wird neu verteilt – jede Runde eine Karte weniger.",
-  "Neben dem Namen kannst du eine Ansage setzen (Gold und Feuerfallen). Ansagen sind freiwillig und dürfen falsch sein.",
+  "Neben deinem Namen kannst du jederzeit eine Ansage setzen: Rolle (oder keine Angabe), Gold und Feuerfallen. Ansagen sind freiwillig und dürfen falsch sein. Mit jeder neuen Runde werden sie gelöscht. Der Verlauf hält fest, was angesagt und was tatsächlich aufgedeckt wurde.",
 ];
 
 const app = document.getElementById("app");
@@ -45,9 +52,13 @@ let unsubSecrets = null;
 let unsubBadge = null;
 let toastTimer = 0;
 let botTimer = 0;
+let botKey = "";
+let hostQueue = Promise.resolve();
 let lastRevealSeq = 0;
-let busy = false;
 let peeking = false;
+let leavingUi = false;
+let leftHandled = new Set();
+let lobbyTools = null;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -106,7 +117,7 @@ function clearSubs() {
   unsubSecrets?.();
   unsubBadge?.();
   unsubRoom = unsubAction = unsubNet = unsubSecrets = unsubBadge = null;
-  clearTimeout(botTimer);
+  clearBotTimer();
 }
 
 async function leaveOnline() {
@@ -120,6 +131,40 @@ async function leaveOnline() {
   state = null;
   secretMine = null;
   secretAll = null;
+  leavingUi = false;
+  leftHandled = new Set();
+}
+
+async function askLeaveRoom() {
+  if (!onlineApi) return;
+  if (!lobbyTools) lobbyTools = await import("../../shared/lobby.js");
+  if (!(await lobbyTools.confirmRoomExit(iAmHost()))) return;
+  leavingUi = true;
+  try {
+    if (iAmHost()) await onlineApi.closeRoom();
+    else await onlineApi.leavePlay();
+  } catch (err) {
+    leavingUi = false;
+    reportError("Verlassen", err);
+    return;
+  }
+  await leaveOnline();
+  renderBoot();
+}
+
+function notePeerLeft(player) {
+  if (!player?.id || leftHandled.has(player.id)) return;
+  leftHandled.add(player.id);
+  toast(`${player.name} hat den Raum verlassen`);
+  if (!iAmHost() || !state) return;
+  handlePeerLeft(player).catch((err) => reportError("Mitspieler weg", err));
+}
+
+async function handlePeerLeft(player) {
+  if (state.phase === "end") return;
+  const next = applyAbort(state, secretAll || {}, player);
+  if (next.error) return;
+  await publish(next.state, next.secrets);
 }
 
 function showRules() {
@@ -173,6 +218,7 @@ async function enterLobby() {
       import("../../shared/lobby.js"),
       import("../../shared/online.js"),
     ]);
+    lobbyTools = lobbyMod;
     onlineApi = api;
     lobbyHandle?.destroy();
     lobbyHandle = lobbyMod.mountLobby(app, {
@@ -187,7 +233,7 @@ async function enterLobby() {
         const match = beginMatch(room.players);
         secretAll = match.secrets;
         secretMine = match.secrets[myId()] || null;
-        await onlineApi.writeAllSecrets(match.secrets);
+        await onlineApi.writeAllSecrets(packSecrets(match.secrets));
         await onlineApi.setState(match.state);
         state = match.state;
       },
@@ -217,14 +263,17 @@ function beginPlay(room) {
     lastRevealSeq = state?.revealSeq || 0;
     clearSubs();
     unsubRoom = onlineApi.onRoomChange((next) => {
-      if (!next || next.status === "kicked") {
-        const kicked = next?.status === "kicked";
+      if (leavingUi) return;
+      if (onlineApi.isRoomGone(next)) {
+        leavingUi = true;
+        const msg = onlineApi.roomExitMessage(next);
         leaveOnline().then(() => {
-          toast(kicked ? "Du wurdest entfernt." : "Der Raum wurde geschlossen.");
+          toast(msg);
           renderBoot();
         });
         return;
       }
+      for (const player of onlineApi.playersWhoLeft(onlineRoom, next)) notePeerLeft(player);
       onlineRoom = next;
       if (next.state) adoptState(migrateState(next.state));
       else render();
@@ -235,6 +284,8 @@ function beginPlay(room) {
     unsubSecrets = onlineApi.onSecrets((payload) => {
       secretMine = payload?.mine ? normalizeSecret(payload.mine) : null;
       if (payload?.all) secretAll = normalizeSecrets(payload.all);
+      if (state && secretAll) auditHands(state, secretAll, "host-secrets");
+      else if (state && secretMine) auditHands(state, { [myId()]: secretMine }, "meine-secrets");
       render();
       scheduleBots();
     });
@@ -248,14 +299,14 @@ function beginPlay(room) {
 }
 
 function adoptState(next) {
+  const seq = Number(next?.revealSeq) || 0;
+  if (seq < lastRevealSeq) lastRevealSeq = 0;
   const prevSeq = lastRevealSeq;
   state = next;
   if (next?.lastReveal?.seq && next.lastReveal.seq > prevSeq) {
     playRevealSound(next.lastReveal.type);
-    lastRevealSeq = next.lastReveal.seq;
-  } else if (next?.revealSeq) {
-    lastRevealSeq = next.revealSeq;
   }
+  lastRevealSeq = seq;
   render();
   scheduleBots();
 }
@@ -269,116 +320,136 @@ function playRevealSound(type) {
   });
 }
 
-async function publish(nextState, nextSecrets) {
-  if (!iAmHost()) return;
-  busy = true;
-  try {
-    if (nextSecrets) {
-      secretAll = nextSecrets;
-      await onlineApi.writeAllSecrets(nextSecrets);
-    }
-    await onlineApi.setState(nextState);
-    state = nextState;
-  } catch (err) {
-    reportError("Spielstand", err);
-  } finally {
-    busy = false;
-  }
+/** Alle Host-Änderungen nacheinander – nichts geht verloren, während gespeichert wird. */
+function runHost(task) {
+  const job = hostQueue.then(task).catch((err) => reportError("Spielstand", err));
+  hostQueue = job;
+  return job;
 }
 
-async function handleAction(action) {
-  if (!iAmHost() || !state || busy) return;
-  if (action.type === "claim") {
-    const next = applyClaim(state, action.from, action.payload?.gold, action.payload?.falle);
-    if (next.error) return;
-    await publish(next.state, null);
-    return;
-  }
-  if (action.type === "reveal") {
-    if (!secretAll) return;
-    const next = applyReveal(
-      state,
-      secretAll,
-      action.from,
-      action.payload?.ownerId,
-      action.payload?.cardId
-    );
-    if (next.error) return;
-    await publish(next.state, next.secrets);
-    return;
-  }
-  if (action.type === "rematch") {
-    if (state.phase !== "end") return;
-    await startRematch();
-  }
+async function publish(nextState, nextSecrets) {
+  if (!iAmHost()) return;
+    if (nextSecrets) {
+      secretAll = nextSecrets;
+      await onlineApi.writeAllSecrets(packSecrets(nextSecrets));
+    }
+  state = nextState;
+  await onlineApi.setState(nextState);
+}
+
+function handleAction(action) {
+  if (!iAmHost()) return Promise.resolve();
+  return runHost(async () => {
+    if (!state) return;
+    if (action.type === "claim") {
+      const next = applyClaim(state, action.from, action.payload?.claim ?? null);
+      if (!next.error) await publish(next.state, null);
+      return;
+    }
+    if (action.type === "reveal") {
+      if (!secretAll) return;
+      const next = applyReveal(state, secretAll, action.from, action.payload?.ownerId, action.payload?.cardId);
+      if (!next.error) await publish(next.state, next.secrets);
+      return;
+    }
+    if (action.type === "leave") {
+      const who = state.players.find((player) => player.id === action.from);
+      notePeerLeft({ id: action.from, name: action.payload?.name || who?.name || "Jemand" });
+      return;
+    }
+    if (action.type === "rematch" && state.phase === "end") {
+      await startRematchNow();
+    }
+  }).finally(scheduleBots);
+}
+
+function botTurnKey() {
+  return state ? `${state.phase}:${state.round}:${state.revealSeq}:${state.keyHolderId}` : "";
+}
+
+function clearBotTimer() {
+  clearTimeout(botTimer);
+  botTimer = 0;
+  botKey = "";
 }
 
 function scheduleBots() {
-  if (botTimer) return;
-  if (!iAmHost() || !state || state.phase !== "play" || busy) return;
-  const holder = onlineRoom?.players?.find((player) => player.id === state.keyHolderId);
-  if (!holder?.dummy) return;
-  botTimer = setTimeout(() => {
-    botTimer = 0;
-    playDummy(holder.id).catch((err) => reportError("Testspieler", err));
-  }, 900);
-}
-
-async function playDummy(id) {
-  if (!iAmHost() || !state || state.phase !== "play" || busy) return;
-  if (state.keyHolderId !== id) return;
-  const player = state.players.find((row) => row.id === id);
-  if (!player) return;
-  if (!player.hasClaim) {
-    const claim = randomClaim(player);
-    const next = applyClaim(state, id, claim.gold, claim.falle);
-    if (!next.error) await publish(next.state, null);
+  if (!iAmHost() || !state || state.phase !== "play") {
+    clearBotTimer();
+    return;
   }
+  const holder = onlineRoom?.players?.find((player) => player.id === state.keyHolderId);
+  if (!holder?.dummy) {
+    clearBotTimer();
+    return;
+  }
+  const key = botTurnKey();
+  if (botTimer && botKey === key) return;
+  clearTimeout(botTimer);
+  botKey = key;
+  const delay = 1000 + Math.floor(Math.random() * 1000);
   botTimer = setTimeout(() => {
     botTimer = 0;
-    playDummyReveal(id).catch((err) => reportError("Testspieler", err));
-  }, 700);
+    botKey = "";
+    runHost(() => playDummy(holder.id, key)).finally(scheduleBots);
+  }, delay);
 }
 
-async function playDummyReveal(id) {
-  if (!iAmHost() || !state || state.phase !== "play" || busy) return;
-  if (state.keyHolderId !== id || !secretAll) return;
-  const target = randomTarget(state, id);
+async function playDummy(id, key) {
+  if (!iAmHost() || !state || state.phase !== "play") return;
+  if (botTurnKey() !== key || state.keyHolderId !== id || !secretAll) return;
+  let working = state;
+  for (const player of working.players) {
+    const isDummy = onlineRoom?.players?.find((row) => row.id === player.id)?.dummy;
+    if (!isDummy || player.claim) continue;
+    const claimed = applyClaim(working, player.id, randomClaim(working.cardsPerHand));
+    if (!claimed.error) working = claimed.state;
+  }
+  const target = randomTarget(working, id);
   if (!target) return;
-  const next = applyReveal(state, secretAll, id, target.ownerId, target.cardId);
-  if (next.error) return;
+  const next = applyReveal(working, secretAll, id, target.ownerId, target.cardId);
+  if (next.error) {
+    console.error("[tempel] Testspieler", next.error);
+    return;
+  }
   await publish(next.state, next.secrets);
 }
 
-async function sendClaim(gold, falle) {
+async function sendClaim(claim) {
   if (!state || state.phase !== "play") return;
   if (iAmHost()) {
-    const next = applyClaim(state, myId(), gold, falle);
-    if (next.error) {
-      toast(next.error);
-      return;
-    }
-    await publish(next.state, null);
+    await runHost(async () => {
+      const next = applyClaim(state, myId(), claim);
+      if (next.error) {
+        toast(next.error);
+        return;
+      }
+      await publish(next.state, null);
+    });
+    scheduleBots();
     return;
   }
   try {
-    await onlineApi.sendAction({ type: "claim", payload: { gold, falle } });
+    await onlineApi.sendAction({ type: "claim", payload: { claim } });
   } catch (err) {
     reportError("Ansage", err);
   }
 }
 
 async function sendReveal(ownerId, cardId) {
-  if (!state || state.phase !== "play" || busy) return;
+  if (!state || state.phase !== "play") return;
   if (state.keyHolderId !== myId()) return;
   if (iAmHost()) {
-    if (!secretAll) return;
-    const next = applyReveal(state, secretAll, myId(), ownerId, cardId);
-    if (next.error) {
-      toast(next.error);
-      return;
-    }
-    await publish(next.state, next.secrets);
+    await runHost(async () => {
+      if (!secretAll || state.keyHolderId !== myId()) return;
+      const next = applyReveal(state, secretAll, myId(), ownerId, cardId);
+      if (next.error) {
+        toast(next.error);
+        return;
+      }
+      await publish(next.state, next.secrets);
+    });
+    scheduleBots();
     return;
   }
   try {
@@ -388,69 +459,122 @@ async function sendReveal(ownerId, cardId) {
   }
 }
 
-async function startRematch() {
+async function startRematchNow() {
   if (!onlineRoom) return;
+  clearBotTimer();
   const match = beginMatch(onlineRoom.players);
   lastRevealSeq = 0;
   await publish(match.state, match.secrets);
 }
 
+async function startRematch() {
+  await runHost(startRematchNow);
+  scheduleBots();
+}
+
 function showClaimDialog() {
   const me = state.players.find((player) => player.id === myId());
-  let gold = me?.hasClaim ? me.claimGold : 0;
-  let falle = me?.hasClaim ? me.claimFalle : 0;
   const max = state.cardsPerHand;
+  let role = me?.claim?.role ?? null;
+  let gold = Math.min(me?.claim?.gold ?? 0, max);
+  let falle = Math.min(me?.claim?.falle ?? 0, max - gold);
   const back = el("div", "dialog-back");
   const dialog = el("div", "dialog");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
   dialog.append(el("h2", "", "Ansage"));
-  dialog.append(el("p", "", "Die Zahlen dürfen stimmen oder nicht. Alle sehen sie neben deinem Namen."));
-  const goldRow = stepper("Gold", gold, max, (n) => {
-    gold = n;
+  dialog.append(el("p", "", `Freiwillig, darf geflunkert sein. Du hast ${max} Karten.`));
+
+  const roles = el("div", "role-pick");
+  const roleButtons = [];
+  for (const [id, label] of [["abenteurer", "Abenteurer"], ["waechterin", "Wächterin"], [null, "keine Angabe"]]) {
+    const button = el("button", "btn", label);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      role = id;
+      paint();
+    });
+    roleButtons.push([id, button]);
+    roles.append(button);
+  }
+  dialog.append(roles);
+
+  const goldRow = el("div", "step-row");
+  const goldMinus = el("button", "btn", "−");
+  const goldNum = el("strong");
+  const goldPlus = el("button", "btn", "+");
+  goldRow.append(el("span", "", "Gold"), goldMinus, goldNum, goldPlus);
+  const trapRow = el("div", "step-row");
+  const trapMinus = el("button", "btn", "−");
+  const trapNum = el("strong");
+  const trapPlus = el("button", "btn", "+");
+  trapRow.append(el("span", "", "Feuerfallen"), trapMinus, trapNum, trapPlus);
+  const emptyRow = el("div", "step-row is-auto");
+  const emptyNum = el("strong");
+  emptyRow.append(el("span", "", "Leer (automatisch)"), emptyNum);
+  for (const button of [goldMinus, goldPlus, trapMinus, trapPlus]) button.type = "button";
+  goldMinus.addEventListener("click", () => {
+    gold = Math.max(0, gold - 1);
+    paint();
   });
-  const trapRow = stepper("Feuerfallen", falle, max, (n) => {
-    falle = n;
+  goldPlus.addEventListener("click", () => {
+    if (gold + falle < max) gold += 1;
+    paint();
   });
-  dialog.append(goldRow, trapRow);
-  const save = el("button", "btn primary", "Ansage setzen");
+  trapMinus.addEventListener("click", () => {
+    falle = Math.max(0, falle - 1);
+    paint();
+  });
+  trapPlus.addEventListener("click", () => {
+    if (gold + falle < max) falle += 1;
+    paint();
+  });
+  dialog.append(goldRow, trapRow, emptyRow);
+
+  const preview = el("p", "claim-preview");
+  dialog.append(preview);
+
+  function paint() {
+    for (const [id, button] of roleButtons) {
+      button.classList.toggle("is-on", id === role);
+      button.setAttribute("aria-pressed", id === role ? "true" : "false");
+    }
+    goldNum.textContent = String(gold);
+    trapNum.textContent = String(falle);
+    emptyNum.textContent = String(max - gold - falle);
+    goldMinus.disabled = gold <= 0;
+    trapMinus.disabled = falle <= 0;
+    goldPlus.disabled = gold + falle >= max;
+    trapPlus.disabled = gold + falle >= max;
+    preview.textContent = claimText({ set: true, role, gold, falle }, max);
+  }
+  paint();
+
+  const save = el("button", "btn primary", "Ansagen");
   save.type = "button";
   save.addEventListener("click", () => {
     back.remove();
-    sendClaim(gold, falle);
+    sendClaim({ role, gold, falle });
   });
+  dialog.append(save);
+  if (me?.claim) {
+    const clear = el("button", "btn", "Ansage zurückziehen");
+    clear.type = "button";
+    clear.addEventListener("click", () => {
+      back.remove();
+      sendClaim(null);
+    });
+    dialog.append(clear);
+  }
   const cancel = el("button", "btn", "Abbrechen");
   cancel.type = "button";
   cancel.addEventListener("click", () => back.remove());
-  dialog.append(save, cancel);
+  dialog.append(cancel);
+  back.addEventListener("click", (event) => {
+    if (event.target === back) back.remove();
+  });
   back.append(dialog);
   document.body.append(back);
-}
-
-function stepper(label, start, max, onChange) {
-  let value = start;
-  const row = el("div", "step-row");
-  row.append(el("span", "", label));
-  const minus = el("button", "btn", "−");
-  minus.type = "button";
-  const num = el("strong", "", String(value));
-  const plus = el("button", "btn", "+");
-  plus.type = "button";
-  const paint = () => {
-    num.textContent = String(value);
-    minus.disabled = value <= 0;
-    plus.disabled = value >= max;
-    onChange(value);
-  };
-  minus.addEventListener("click", () => {
-    value = Math.max(0, value - 1);
-    paint();
-  });
-  plus.addEventListener("click", () => {
-    value = Math.min(max, value + 1);
-    paint();
-  });
-  row.append(minus, num, plus);
-  paint();
-  return row;
 }
 
 function bindPeek(button) {
@@ -541,7 +665,10 @@ function renderPlay() {
   const badge = el("div");
   if (unsubBadge) unsubBadge();
   unsubBadge = onlineApi.mountConnectionBadge(badge);
-  top.append(badge);
+  const tools = el("div", "lobby-top-tools");
+  tools.append(badge);
+  lobbyTools?.appendRoomMenu(tools, { isHost: iAmHost(), onExit: askLeaveRoom });
+  top.append(tools);
   body.append(top);
 
   const stats = el("div", "tempel-stats");
@@ -585,26 +712,33 @@ function renderPlay() {
     own.append(el("p", "lead", "Eine Rollenkarte liegt ungesehen beiseite."));
   }
 
+  const hiddenN = mine ? faceDownCards(mine).length : 0;
+  const hiddenCounts = secretMine?.counts;
+  own.append(
+    el(
+      "p",
+      "own-hidden",
+      hiddenCounts
+        ? `Noch verdeckt: ${hiddenN} Karten (davon ${hiddenCounts.gold} Gold / ${hiddenCounts.falle} Fallen / ${hiddenCounts.leer} leer)`
+        : `Noch verdeckt: ${hiddenN} Karten`
+    )
+  );
   const counts = el("div", "counts");
   for (const type of ["gold", "falle", "leer"]) {
     const box = el("div", "count");
     const img = document.createElement("img");
     img.src = asset(type);
     img.alt = TYPE_LABEL[type];
-    box.append(img, el("strong", "", String(secretMine?.counts?.[type] ?? "–")), el("span", "", TYPE_LABEL[type]));
+    box.append(img, el("strong", "", String(hiddenCounts ? hiddenCounts[type] : "–")), el("span", "", TYPE_LABEL[type]));
     counts.append(box);
   }
   own.append(counts);
+  const shownMine = mine ? shownCounts(mine) : { gold: 0, falle: 0, leer: 0 };
+  own.append(el("p", "own-shown", `In dieser Runde bei dir aufgedeckt: ${shownText(shownMine)}`));
 
   const claim = el("div", "claim-line");
-  claim.append(
-    el(
-      "span",
-      "",
-      mine?.hasClaim ? `Ansage: ${mine.claimGold} Gold, ${mine.claimFalle} Feuerfallen` : "Keine Ansage"
-    )
-  );
-  const edit = el("button", "btn", mine?.hasClaim ? "Ändern" : "Ansage");
+  claim.append(el("span", "", mine?.claim ? claimText(mine.claim, state.cardsPerHand) : "Keine Ansage"));
+  const edit = el("button", "btn", "Ansagen");
   edit.type = "button";
   edit.disabled = state.phase !== "play";
   edit.addEventListener("click", showClaimDialog);
@@ -627,23 +761,29 @@ function renderPlay() {
       key.title = "Schlüssel";
       head.append(key);
     }
-    head.append(
-      el(
-        "span",
-        "claim",
-        player.hasClaim ? `${player.claimGold} Gold · ${player.claimFalle} Fallen` : "keine Ansage"
-      )
-    );
     card.append(head);
+    card.append(el("p", player.claim ? "claim" : "claim is-none", claimText(player.claim, state.cardsPerHand)));
+    const shown = shownCounts(player);
+    if (shown.gold || shown.falle || shown.leer) {
+      card.append(el("p", "shown", `Aufgedeckt diese Runde: ${shownText(shown)}`));
+    }
     const row = el("div", "chamber-row");
     const canPick = iHaveKey && player.id !== me && state.phase === "play";
-    for (const chamber of cardList(player)) {
-      const flip = state.lastReveal?.seq && state.lastReveal.cardId === chamber.id && state.lastReveal.seq === lastRevealSeq;
+    for (const chamber of faceDownCards(player)) {
       row.append(
         chamberButton(chamber, {
           ownerId: player.id,
           canPick,
-          flip: Boolean(flip && chamber.shown),
+        })
+      );
+    }
+    for (const chamber of cardList(player).filter((item) => item.shown)) {
+      const flip = state.lastReveal?.seq && state.lastReveal.cardId === chamber.id && state.lastReveal.seq === lastRevealSeq;
+      row.append(
+        chamberButton(chamber, {
+          ownerId: player.id,
+          canPick: false,
+          flip: Boolean(flip),
         })
       );
     }
@@ -657,6 +797,7 @@ function renderPlay() {
     for (const entry of [...state.log].reverse()) log.append(el("li", "", logLine(entry)));
     body.append(log);
   }
+  appendRoundLog(body);
 
   const rules = el("button", "btn", "Regeln");
   rules.type = "button";
@@ -664,6 +805,24 @@ function renderPlay() {
   dock.append(rules);
   view.append(body, dock);
   app.replaceChildren(view);
+}
+
+function appendRoundLog(parent) {
+  if (!state.roundLog?.length) return;
+  parent.append(el("h2", "lobby-list-title", "Ansagen je Runde"));
+  for (const round of [...state.roundLog].reverse()) {
+    const block = el("div", "round-block");
+    block.append(el("p", "round-title", `Runde ${round.round} · ${round.cardsPerHand} Karten`));
+    const list = el("ul", "log-list");
+    for (const entry of round.entries) {
+      const item = el("li", "");
+      item.append(el("strong", "", entry.name), document.createTextNode(`: ${claimText(entry.claim, round.cardsPerHand)}`));
+      item.append(el("span", "shown", `aufgedeckt: ${shownText(entry.shown)}`));
+      list.append(item);
+    }
+    block.append(list);
+    parent.append(block);
+  }
 }
 
 function renderEnd() {
@@ -675,18 +834,23 @@ function renderEnd() {
   const badge = el("div");
   if (unsubBadge) unsubBadge();
   unsubBadge = onlineApi.mountConnectionBadge(badge);
-  top.append(badge);
+  const tools = el("div", "lobby-top-tools");
+  tools.append(badge);
+  lobbyTools?.appendRoomMenu(tools, { isHost: iAmHost(), onExit: askLeaveRoom });
+  top.append(tools);
   body.append(top);
-  body.append(el("h1", "", winnerTitle(state.winner)));
+  body.append(el("h1", "", winnerTitle(state.winner, state.endReason)));
   body.append(
     el(
       "p",
       "lead",
-      state.winner === "abenteurer"
-        ? "Alles Gold ist gefunden."
-        : state.trapFound >= state.trapTotal
-          ? "Alle Feuerfallen sind aufgedeckt."
-          : "Nach der letzten Runde blieb Gold verborgen."
+      state.endReason === "left"
+        ? `${state.leftName || "Jemand"} hat den Raum verlassen. Das Spiel kann nicht fortgesetzt werden.`
+        : state.winner === "abenteurer"
+          ? "Alles Gold ist gefunden."
+          : state.trapFound >= state.trapTotal
+            ? "Alle Feuerfallen sind aufgedeckt."
+            : "Nach der letzten Runde blieb Gold verborgen."
     )
   );
   body.append(
@@ -707,6 +871,7 @@ function renderEnd() {
     list.append(row);
   }
   body.append(list);
+  appendRoundLog(body);
 
   const again = el("button", "btn primary", "Nochmal");
   again.type = "button";

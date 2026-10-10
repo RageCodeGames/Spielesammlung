@@ -267,6 +267,30 @@ export function resumeTurn(state, now = Date.now(), rng = Math.random) {
   return startTurn({ ...state, paused: false, waitingForHost: false }, now, rng);
 }
 
+export function dropPlayer(state, playerId) {
+  const idx = (state.players || []).findIndex((player) => player.id === playerId);
+  if (idx < 0) return state;
+  const players = state.players.filter((player) => player.id !== playerId);
+  if (players.length < MIN_PLAYERS) {
+    return {
+      ...state,
+      players,
+      phase: "end",
+      started: false,
+      paused: false,
+      waitingForHost: false,
+      needCategory: false,
+      deadline: null,
+      burst: null,
+    };
+  }
+  let current = Number(state.current) || 0;
+  if (idx < current) current -= 1;
+  else if (idx === current) current = current % players.length;
+  if (current >= players.length) current = 0;
+  return { ...state, players, current };
+}
+
 export function skipCurrent(state, now = Date.now(), rng = Math.random) {
   if (state.phase !== "play" || !state.started || state.paused || state.needCategory) {
     return { state, effect: "ignore" };

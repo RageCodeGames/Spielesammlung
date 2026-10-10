@@ -44,6 +44,7 @@ import {
   applyReady,
   beginOnlineMatch,
   beginOnlineRematch,
+  applyForfeit,
   fireOnlineShot,
   migrateOnlineState,
   normalizeOnlineSettings,
@@ -112,6 +113,9 @@ let enteringOnline = false;
 let lastShotSeqSeen = 0;
 let onlineBusy = false;
 let lastOnlineTurn = null;
+let leavingUi = false;
+let leftHandled = new Set();
+let lobbyTools = null;
 
 const app = document.getElementById("app");
 
@@ -195,7 +199,42 @@ async function leaveOnline() {
   lastShotSeqSeen = 0;
   softStatus = null;
   flashCell = null;
+  leavingUi = false;
+  leftHandled = new Set();
   set(ONLINE_DRAFT_KEY, null);
+}
+
+async function askLeaveRoom() {
+  if (!onlineApi) return;
+  if (!lobbyTools) lobbyTools = await import("../../shared/lobby.js");
+  if (!(await lobbyTools.confirmRoomExit(iAmHost()))) return;
+  leavingUi = true;
+  try {
+    if (iAmHost()) await onlineApi.closeRoom();
+    else await onlineApi.leavePlay();
+  } catch (err) {
+    leavingUi = false;
+    reportError("Verlassen", err);
+    return;
+  }
+  await leaveOnline();
+  playMode = null;
+  state = freshState();
+  render();
+}
+
+function notePeerLeft(player) {
+  if (!player?.id || leftHandled.has(player.id)) return;
+  leftHandled.add(player.id);
+  toast(`${player.name} hat den Raum verlassen`);
+  if (!iAmHost() || !onlineState) return;
+  handlePeerLeft(player.id).catch((err) => reportError("Mitspieler weg", err));
+}
+
+async function handlePeerLeft(playerId) {
+  const next = applyForfeit(onlineState, playerId);
+  if (next.error || next.state === onlineState) return;
+  await publishOnlineState(next.state);
 }
 
 function opponentOnline() {
@@ -417,13 +456,7 @@ function ownSunk(ship) {
 
 function askNewGame() {
   if (isOnline()) {
-    confirmDialog(iAmHost() ? "Raum schließen und neu beginnen?" : "Raum verlassen und neu beginnen?", () => {
-      leaveOnline().then(() => {
-        playMode = null;
-        state = freshState();
-        render();
-      });
-    });
+    askLeaveRoom();
     return;
   }
   if (state.phase === "place" || state.phase === "battle") {
@@ -947,6 +980,11 @@ async function handleOnlineAction(action) {
     await publishOnlineState(fired.state);
     return;
   }
+  if (type === "leave") {
+    const name = action.payload?.name || onlineState.playerNames?.[from] || "Jemand";
+    notePeerLeft({ id: from, name });
+    return;
+  }
   if (type === "rematch") {
     if (onlineState.phase !== "end") return;
     const players = (onlineRoom?.players || []).map((player, index) => ({
@@ -972,6 +1010,7 @@ async function enterOnline() {
       import("../../shared/lobby.js"),
       import("../../shared/online.js"),
     ]);
+    lobbyTools = lobbyMod;
     onlineApi = api;
     lobbyHandle?.destroy();
     const initial = normalizeOnlineSettings({
@@ -1051,16 +1090,19 @@ function beginOnlinePlay(room) {
     }
     clearOnlineSubs();
     unsubRoom = onlineApi.onRoomChange((next) => {
-      if (!next || next.status === "kicked") {
-        const kicked = next?.status === "kicked";
+      if (leavingUi) return;
+      if (onlineApi.isRoomGone(next)) {
+        leavingUi = true;
+        const msg = onlineApi.roomExitMessage(next);
         leaveOnline().then(() => {
           playMode = null;
           state = freshState();
-          toast(kicked ? "Du wurdest entfernt." : "Der Raum wurde geschlossen.");
+          toast(msg);
           render();
         });
         return;
       }
+      for (const player of onlineApi.playersWhoLeft(onlineRoom, next)) notePeerLeft(player);
       onlineRoom = next;
       if (next.state) adoptOnlineState(next.state);
       else render();
@@ -1340,7 +1382,9 @@ function renderPlace() {
   const fresh = el("button", "btn", "Neues Spiel");
   fresh.type = "button";
   fresh.addEventListener("click", askNewGame);
-  bar.append(el("span", "spacer"), fresh);
+  bar.append(el("span", "spacer"));
+  if (isOnline()) lobbyTools?.appendRoomMenu(bar, { isHost: iAmHost(), onExit: askLeaveRoom });
+  else bar.append(fresh);
   view.append(bar);
   view.append(el("h1", "", "Schiffe legen"));
   if (isOnline()) {
@@ -1611,7 +1655,10 @@ function renderBattle() {
   const fresh = el("button", "btn", "Neues Spiel");
   fresh.type = "button";
   fresh.addEventListener("click", askNewGame);
-  if (isBot() || isOnline()) {
+  if (isOnline()) {
+    bar.append(el("span", "spacer"));
+    lobbyTools?.appendRoomMenu(bar, { isHost: iAmHost(), onExit: askLeaveRoom });
+  } else if (isBot()) {
     bar.append(el("span", "spacer"), fresh);
   } else {
     const undoButton = el("button", "btn", "Rückgängig");
@@ -1832,9 +1879,18 @@ function sizeEndGrid(grid, view) {
 function renderEnd() {
   document.body.classList.remove("is-battle");
   const view = el("section", "end-screen");
-  view.append(backLink());
+  const top = el("div", "battle-bar");
+  top.append(backLink());
+  if (isOnline()) {
+    top.append(el("span", "spacer"));
+    lobbyTools?.appendRoomMenu(top, { isHost: iAmHost(), onExit: askLeaveRoom });
+  }
+  view.append(top);
   if (!isBot() && !isOnline()) view.append(codeLine(state.code));
   view.append(el("h1", "", state.outcome === "won" ? "Gewonnen" : "Verloren"));
+  if (isOnline() && onlineState?.endReason === "left") {
+    view.append(el("p", "lead", "Gegner hat das Spiel verlassen"));
+  }
   const mine = ownShotStats(state);
   if (isOnline() && onlineState) {
     const me = myOnlineId();

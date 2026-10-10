@@ -598,43 +598,132 @@ export async function joinRoom(code, name, options = {}) {
   }
 }
 
-export async function leaveRoom(options = {}) {
-  const code = roomCode;
-  const wasHost = isHost();
-  const kicked = options.kicked === true;
-  const switching = options.switching === true;
-
-  detachRoomListeners();
-  if (disconnectOp) {
-    try {
-      await disconnectOp.cancel();
-    } catch {
-      /* offline */
-    }
-    disconnectOp = null;
+async function cancelPresence() {
+  if (!disconnectOp) return;
+  try {
+    await disconnectOp.cancel();
+  } catch {
+    /* offline */
   }
+  disconnectOp = null;
+}
 
-  if (code && uid && fb?.dbMod && db && !kicked) {
-    const { ref, remove } = fb.dbMod;
-    try {
-      if (wasHost) {
-        await remove(ref(db, `roomSecrets/${code}`));
-        await remove(ref(db, `rooms/${code}`));
-        await remove(ref(db, `roomIndex/${code}`));
-      } else {
-        await remove(ref(db, `rooms/${code}/players/${uid}`));
-      }
-    } catch {
-      /* Raum kann schon weg sein */
-    }
-  }
-
+function clearLocalRoom({ keepSession = false } = {}) {
   roomCode = null;
   gameId = null;
   hostId = null;
   lastSnapshot = null;
   lastSecrets = null;
-  if (!switching) clearSession();
+  if (!keepSession) clearSession();
+}
+
+async function deleteRoomData(code) {
+  if (!code || !fb?.dbMod || !db) return;
+  const { ref, remove } = fb.dbMod;
+  await remove(ref(db, `roomSecrets/${code}`));
+  await remove(ref(db, `rooms/${code}`));
+  await remove(ref(db, `roomIndex/${code}`));
+}
+
+/** Host beendet den Raum für alle. Sitzung wird gelöscht, niemand tritt automatisch wieder bei. */
+export async function closeRoom() {
+  try {
+    await initOnline();
+    const code = roomCode;
+    if (!code) {
+      clearLocalRoom();
+      return;
+    }
+    if (!isHost()) fail("not-host", "Nur der Host kann den Raum schließen.");
+    const { ref, update } = fb.dbMod;
+    try {
+      await update(ref(db, `rooms/${code}/meta`), { status: "closed" });
+    } catch (err) {
+      console.error("[online] Status closed", err);
+    }
+    detachRoomListeners();
+    await cancelPresence();
+    try {
+      await deleteRoomData(code);
+    } catch (err) {
+      console.error("[online] Raum löschen", err);
+    }
+    clearLocalRoom();
+    emitRoom({
+      code,
+      gameId: null,
+      hostId: uid,
+      status: "closed",
+      settings: {},
+      createdAt: 0,
+      state: null,
+      players: [],
+      you: { id: uid, name: "", isHost: true },
+    });
+  } catch (err) {
+    rethrow(err);
+  }
+}
+
+export async function leaveRoom(options = {}) {
+  const code = roomCode;
+  const wasHost = isHost();
+  const kicked = options.kicked === true;
+  const switching = options.switching === true;
+  const asPlayer = options.asPlayer === true;
+
+  if (wasHost && !kicked && !switching && !asPlayer) {
+    return closeRoom();
+  }
+
+  detachRoomListeners();
+  await cancelPresence();
+
+  if (code && uid && fb?.dbMod && db && !kicked) {
+    const { ref, remove } = fb.dbMod;
+    try {
+      await remove(ref(db, `rooms/${code}/players/${uid}`));
+    } catch {
+      /* Raum kann schon weg sein */
+    }
+  }
+
+  clearLocalRoom({ keepSession: switching });
+}
+
+/**
+ * Mitspieler verlässt ein laufendes Spiel: zuerst den Host benachrichtigen, dann austreten.
+ * Der Host schließt den Raum über closeRoom().
+ */
+export async function leavePlay() {
+  try {
+    await initOnline();
+    if (isHost()) return closeRoom();
+    const name = lastSnapshot?.you?.name || lastSnapshot?.players?.find((row) => row.isSelf)?.name || "Spieler";
+    try {
+      await sendAction({ type: "leave", payload: { name } });
+    } catch (err) {
+      console.error("[online] Verlassen melden", err);
+    }
+    return leaveRoom({ asPlayer: true });
+  } catch (err) {
+    rethrow(err);
+  }
+}
+
+export function roomExitMessage(snapshot) {
+  if (snapshot?.status === "kicked") return "Du wurdest entfernt.";
+  return "Der Host hat den Raum geschlossen";
+}
+
+export function isRoomGone(snapshot) {
+  return !snapshot || snapshot.status === "kicked" || snapshot.status === "closed";
+}
+
+/** Mitspieler, die seit dem letzten Stand fehlen (nicht man selbst). */
+export function playersWhoLeft(prev, next) {
+  if (!prev?.players || !next?.players) return [];
+  return prev.players.filter((player) => !player.isSelf && !next.players.some((row) => row.id === player.id));
 }
 
 export function onRoomChange(callback) {

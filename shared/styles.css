@@ -584,6 +584,12 @@ body.online-test #app:not(:has(> .screen)) {
   gap: 0.75rem;
 }
 
+.lobby-top-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
 .lobby-field {
   display: flex;
   flex-direction: column;
@@ -701,5 +707,60 @@ body.online-test #app:not(:has(> .screen)) {
   white-space: pre-wrap;
   user-select: text;
   -webkit-user-select: text;
+}
+
+.dialog-back {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(8, 14, 24, 0.88);
+}
+
+.dialog {
+  width: min(100%, 22rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  border-radius: 1.1rem;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.dialog p {
+  margin: 0;
+}
+
+.room-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.room-menu-btn {
+  width: 48px;
+  min-width: 48px;
+  padding: 0;
+  font-size: 1.35rem;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.room-menu-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 9;
+  min-width: 12.5rem;
+  padding: 0.35rem;
+  border-radius: 0.9rem;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.room-menu-pop .btn {
+  width: 100%;
 }
 
