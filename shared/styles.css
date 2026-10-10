@@ -240,30 +240,66 @@ body.page .shell {
   padding-top: 0.75rem;
 }
 
+/* Spiel-Root: füllt Body, Dock bleibt unten sichtbar. Hub (.shell) scrollt selbst. */
+body.schiffe #app,
+body.tapper #app,
+body.online-test #app {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 /* Volle Bildschirmhöhe: Inhalt scrollt, Aktionsleiste bleibt unten sichtbar. */
 .screen {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
   width: min(100%, 34rem);
   margin-inline: auto;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .screen-body {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   padding: 0.75rem var(--page-pad-x) 1rem;
   display: flex;
   flex-direction: column;
   gap: 0.85rem;
+  align-items: stretch;
+}
+
+/* In scrollbaren Bereichen nichts zusammendrücken – Höhe folgt dem Inhalt. */
+.screen-body > *,
+.screen-body .choices,
+.screen-body .stack,
+.screen-body .choice,
+.screen-body .switch-row,
+.screen-body .note,
+.screen-body .player-row,
+.screen-body .preset,
+.screen-body .lobby-settings,
+.screen-body .lobby-settings-body > *,
+.screen-body .lobby-player,
+.screen-body .group-label,
+.screen-body .stepper,
+.screen-body .counter,
+.screen-body .mini-ships,
+.shell > * {
+  flex-shrink: 0;
 }
 
 .screen-dock {
   flex: 0 0 auto;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: 0.55rem;
@@ -272,6 +308,12 @@ body.page .shell {
   background: var(--bg);
   border-top: 1px solid rgba(244, 239, 230, 0.1);
   box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.28);
+  position: relative;
+  z-index: 5;
+}
+
+.screen-dock > * {
+  flex-shrink: 0;
 }
 
 .screen-dock .btn,
@@ -280,17 +322,11 @@ body.page .shell {
 }
 
 /* Spiel-Root ohne Dock (Kampf, Platzieren): unterer Abstand am Inhalt. */
-body.schiffe #app,
-body.tapper #app,
-body.online-test #app {
+body.schiffe #app:not(:has(> .screen)),
+body.tapper #app:not(:has(> .screen)),
+body.online-test #app:not(:has(> .screen)) {
   padding-bottom: var(--page-bottom);
-}
-
-/* Mit fester Aktionsleiste: Abstand nur in der Leiste, nicht doppelt. */
-body.schiffe #app:has(> .screen),
-body.tapper #app:has(> .screen),
-body.online-test #app:has(> .screen) {
-  padding-bottom: 0;
+  overflow: auto;
 }
 
 .topbar {
@@ -450,15 +486,23 @@ body.online-test #app:has(> .screen) {
   background: #5c2e2e;
 }
 
-.choices {
+.choices,
+.stack {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+  flex-shrink: 0;
 }
 
-.choice {
-  text-align: left;
+.choice,
+.switch-row {
+  display: block;
+  width: 100%;
+  flex-shrink: 0;
+  flex-grow: 0;
+  height: auto;
   min-height: 48px;
+  max-height: none;
   padding: 0.75rem 1rem;
   border: 2px solid transparent;
   border-radius: 1rem;
@@ -466,45 +510,42 @@ body.online-test #app:has(> .screen) {
   color: var(--text);
   font: inherit;
   font-weight: 700;
-  cursor: pointer;
-  overflow: hidden;
-}
-
-.choice small {
-  display: block;
-  margin-top: 0.15rem;
-  color: var(--muted);
-  font-weight: 500;
-  font-size: 0.9rem;
-}
-
-.choice.is-on {
-  border-color: var(--accent);
-}
-
-.switch-row {
-  min-height: 48px;
-  padding: 0.75rem 1rem;
-  border-radius: 1rem;
-  background: var(--surface);
-  border: 2px solid transparent;
-  color: inherit;
-  font: inherit;
-  font-weight: 700;
   text-align: left;
   cursor: pointer;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
+.choice small,
 .switch-row small {
   display: block;
   margin-top: 0.15rem;
   color: var(--muted);
   font-weight: 500;
   font-size: 0.9rem;
+  line-height: 1.35;
+  white-space: normal;
+  overflow: visible;
 }
 
+.choice strong,
+.switch-row strong {
+  display: block;
+  white-space: normal;
+}
+
+.choice.is-on,
 .switch-row.is-on {
   border-color: var(--accent);
+}
+
+.group-label {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+  flex-shrink: 0;
 }
 
 .lobby-kicker {
@@ -663,10 +704,3 @@ body.online-test #app:has(> .screen) {
   -webkit-user-select: text;
 }
 
-body.online-test #app {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}

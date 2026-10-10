@@ -41,6 +41,7 @@ import {
 import { benchmarkBots, chooseShot } from "./bot.js";
 import { playTone, unlock } from "../../shared/sound.js";
 import { get, set } from "../../shared/storage.js";
+import { preserveScreenScroll } from "../../shared/scroll.js";
 import { requestWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
 
@@ -1229,16 +1230,18 @@ function renderEnd() {
 let showingResume = false;
 
 function draw() {
-  document.body.dataset.phase = showingResume ? "resume" : state.phase;
-  if (showingResume) {
-    renderResumeScreen();
-    return;
-  }
-  if (state.phase === "setup" && !playMode) renderVersus();
-  else if (state.phase === "setup") renderSettings();
-  else if (state.phase === "place") renderPlace();
-  else if (state.phase === "battle") renderBattle();
-  else renderEnd();
+  preserveScreenScroll(app, () => {
+    document.body.dataset.phase = showingResume ? "resume" : state.phase;
+    if (showingResume) {
+      renderResumeScreen();
+      return;
+    }
+    if (state.phase === "setup" && !playMode) renderVersus();
+    else if (state.phase === "setup") renderSettings();
+    else if (state.phase === "place") renderPlace();
+    else if (state.phase === "battle") renderBattle();
+    else renderEnd();
+  });
 }
 
 function render() {

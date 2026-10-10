@@ -11,14 +11,6 @@ body.tapper #app {
   font-size: 1rem;
 }
 
-.choices,
-.stack {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-}
-
-.choice,
 .btn,
 .letter,
 .mark-menu button {
@@ -30,41 +22,6 @@ body.tapper #app {
   font: inherit;
   font-weight: 700;
   cursor: pointer;
-}
-
-.choice {
-  text-align: left;
-  padding: 0.75rem 1rem;
-  overflow: hidden;
-}
-
-.choice small,
-.switch-row small {
-  display: block;
-  margin-top: 0.15rem;
-  color: var(--muted);
-  font-weight: 500;
-  font-size: 0.9rem;
-}
-
-.choice.is-on {
-  border-color: var(--accent);
-}
-
-.switch-row {
-  min-height: 48px;
-  padding: 0.75rem 1rem;
-  border-radius: 1rem;
-  background: var(--surface);
-  border: 2px solid transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.switch-row.is-on {
-  border-color: var(--accent);
 }
 
 .btn {
@@ -101,12 +58,6 @@ body.tapper #app {
 
 .free-suggestions .btn {
   flex: 0 1 auto;
-  font-size: 0.95rem;
-}
-
-.group-label {
-  margin: 0.2rem 0 0;
-  color: var(--muted);
   font-size: 0.95rem;
 }
 

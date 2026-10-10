@@ -92,6 +92,15 @@ export function mountLobby(root, options = {}) {
   let unsubBadge = null;
   let settingsOpen = false;
   let entryStep = joinPrefill ? "join" : "choice";
+  let lastRoomFinger = "";
+
+  function roomFingerprint(room) {
+    if (!room) return "";
+    const players = room.players
+      .map((p) => `${p.id}:${p.name}:${p.online ? 1 : 0}:${p.seat}`)
+      .join("|");
+    return `${room.code}:${room.status}:${players}`;
+  }
 
   root.innerHTML = "";
   root.classList.add("lobby");
@@ -114,6 +123,12 @@ export function mountLobby(root, options = {}) {
         showError(hint, err, true);
         render();
       }
+      return;
+    }
+    const finger = roomFingerprint(next);
+    if (finger && finger === lastRoomFinger && body.querySelector(".lobby-code")) {
+      const sum = body.querySelector(".lobby-settings-sum");
+      if (sum && settingsPanel?.summarize) sum.textContent = settingsPanel.summarize(next.settings || {});
       return;
     }
     render();
@@ -509,14 +524,23 @@ export function mountLobby(root, options = {}) {
 
   function render() {
     if (destroyed || started) return;
+    const keepScroll = Boolean(snapshot && body.querySelector(".lobby-code"));
+    const top = keepScroll ? body.scrollTop : 0;
     if (typeof navigator !== "undefined" && navigator.onLine === false && !snapshot) {
       renderOffline();
+      lastRoomFinger = "";
       return;
     }
     if (snapshot) {
       renderRoom(snapshot);
+      lastRoomFinger = roomFingerprint(snapshot);
+      body.scrollTop = top;
+      requestAnimationFrame(() => {
+        body.scrollTop = top;
+      });
       return;
     }
+    lastRoomFinger = "";
     if (entryStep === "create") renderCreate();
     else if (entryStep === "join") renderJoin();
     else renderChoice();

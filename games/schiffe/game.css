@@ -50,14 +50,6 @@ body.schiffe.is-battle #app {
   font-size: 1rem;
 }
 
-.choices,
-.stack {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-}
-
-.choice,
 .btn,
 .ship-chip,
 .mark-menu button {
@@ -71,43 +63,9 @@ body.schiffe.is-battle #app {
   cursor: pointer;
 }
 
-.choice {
-  text-align: left;
-  padding: 0.75rem 1rem;
-}
-
-.choice small,
-.switch-row small {
-  display: block;
-  margin-top: 0.15rem;
-  color: var(--muted);
-  font-weight: 500;
-  font-size: 0.9rem;
-}
-
 .choice.is-on,
 .ship-chip.is-on {
   border-color: var(--accent);
-}
-
-.switch-row {
-  min-height: 48px;
-  padding: 0.75rem 1rem;
-  border-radius: 1rem;
-  background: var(--surface);
-  border: 2px solid transparent;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.switch-row.is-on {
-  border-color: var(--accent);
-}
-
-.switch-row strong {
-  display: block;
 }
 
 .btn {

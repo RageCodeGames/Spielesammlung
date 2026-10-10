@@ -38,6 +38,7 @@ import {
 } from "./logic.js";
 import { getAudioContext, isSoundEnabled, playTone, unlock } from "../../shared/sound.js";
 import { get, set } from "../../shared/storage.js";
+import { preserveScreenScroll } from "../../shared/scroll.js";
 import { requestWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
 
@@ -474,12 +475,24 @@ async function enterOnline() {
         initial: draft,
         summarize: summarizeSettings,
         render(container, { settings: current, onChange }) {
-          container.innerHTML = "";
-          appendSettingsControls(container, normalizeSettings(current), (next) => {
-            draft = next;
-            set(SETTINGS_KEY, next);
-            onChange(next);
-          });
+          const paint = (settings) => {
+            const top = container.parentElement?.closest(".screen-body")?.scrollTop ?? 0;
+            container.innerHTML = "";
+            appendSettingsControls(container, normalizeSettings(settings), (next) => {
+              draft = next;
+              set(SETTINGS_KEY, next);
+              paint(next);
+              onChange(next);
+            });
+            const scroller = container.parentElement?.closest(".screen-body");
+            if (scroller) {
+              scroller.scrollTop = top;
+              requestAnimationFrame(() => {
+                scroller.scrollTop = top;
+              });
+            }
+          };
+          paint(current);
         },
       },
       async onBeforeStart(room) {
@@ -1199,35 +1212,37 @@ function renderResume() {
 }
 
 function render() {
-  document.body.classList.toggle("is-play", Boolean(state && state.phase === "play"));
-  if (unsubBadge && (step !== "play" || state?.phase !== "play")) {
-    unsubBadge();
-    unsubBadge = null;
-  }
-  if (step === "lobby") return;
-  if (showingResume) {
-    renderResume();
-    return;
-  }
-  if (step === "play" && !state) {
-    const view = el("section", "screen setup");
-    const body = el("div", "screen-body");
-    body.append(backLink());
-    body.append(el("h1", "", "Tapper"));
-    body.append(el("p", "note", "Warten auf den Host …"));
-    view.append(body);
-    app.replaceChildren(view);
-    return;
-  }
-  if (!state) {
-    if (step === "settings") renderSettings();
-    else if (step === "players") renderPlayers();
-    else renderMode();
-    return;
-  }
-  if (state.phase === "play") renderPlay();
-  else if (state.phase === "boom") renderBoom();
-  else renderEnd();
+  preserveScreenScroll(app, () => {
+    document.body.classList.toggle("is-play", Boolean(state && state.phase === "play"));
+    if (unsubBadge && (step !== "play" || state?.phase !== "play")) {
+      unsubBadge();
+      unsubBadge = null;
+    }
+    if (step === "lobby") return;
+    if (showingResume) {
+      renderResume();
+      return;
+    }
+    if (step === "play" && !state) {
+      const view = el("section", "screen setup");
+      const body = el("div", "screen-body");
+      body.append(backLink());
+      body.append(el("h1", "", "Tapper"));
+      body.append(el("p", "note", "Warten auf den Host …"));
+      view.append(body);
+      app.replaceChildren(view);
+      return;
+    }
+    if (!state) {
+      if (step === "settings") renderSettings();
+      else if (step === "players") renderPlayers();
+      else renderMode();
+      return;
+    }
+    if (state.phase === "play") renderPlay();
+    else if (state.phase === "boom") renderBoom();
+    else renderEnd();
+  });
 }
 
 function boot() {
