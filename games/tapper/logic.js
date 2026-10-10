@@ -1,3 +1,5 @@
+import { normalizeRemote } from "../../shared/online.js";
+
 export const ABC = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 export const DEFAULT_OFF = ["C", "Q", "X", "Y"];
 
@@ -122,13 +124,36 @@ export function freshState(players, settings, categories, rng = Math.random) {
 export function migrateState(data) {
   if (!data || typeof data !== "object") return data;
   const settings = normalizeSettings(data.settings);
+  const next = normalizeRemote(data, {
+    arrays: ["players", "locked", "usedCategories"],
+    defaults: {
+      started: false,
+      paused: false,
+      needCategory: false,
+      waitingForHost: false,
+      deadline: null,
+    },
+  });
   return {
-    ...data,
+    ...next,
     settings,
-    needCategory: !!data.needCategory,
-    waitingForHost: !!data.waitingForHost,
-    category: data.category == null ? (isFreeMode(settings) ? FREE_LABEL : data.category) : data.category,
+    deadline: next.deadline == null ? null : Number(next.deadline),
+    category:
+      next.category == null ? (isFreeMode(settings) ? FREE_LABEL : next.category) : next.category,
   };
+}
+
+export function summarizeSettings(raw) {
+  const settings = normalizeSettings(raw);
+  const timer = TIMERS[settings.timer]?.label || "Normal";
+  const scoring = settings.scoring === "survive" ? "Überleben" : "Bombenpunkte";
+  const end =
+    settings.scoring === "bombs" && settings.endMode === "bombs"
+      ? `${settings.bombLimit} Bombenpunkte`
+      : `${settings.rounds} Runden`;
+  const category = settings.categoryMode === "free" ? "Freie Kategorie" : "Kategorie-Liste";
+  const tick = settings.tick ? "Ticken an" : "Ticken aus";
+  return `${timer} · ${scoring} · ${end} · ${category} · ${tick}`;
 }
 
 export function isRunning(data) {

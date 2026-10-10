@@ -30,9 +30,11 @@ import {
   setFreeCategory,
   skipCurrent,
   startTurn,
+  summarizeSettings,
   tapLetter,
   uniqueCategories,
   waitForHost,
+  migrateState,
 } from "./logic.js";
 import { getAudioContext, isSoundEnabled, playTone, unlock } from "../../shared/sound.js";
 import { get, set } from "../../shared/storage.js";
@@ -138,6 +140,35 @@ function toast(message) {
   document.body.append(node);
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => node.remove(), 1600);
+}
+
+function reportError(context, err) {
+  console.error(`[tapper] ${context}`, err);
+  toast(err?.message || "Etwas ist schiefgelaufen.");
+}
+
+function showOnlineCrash(err) {
+  reportError("Online-Spiel", err);
+  stopTimers();
+  step = "play";
+  const view = el("section", "screen setup");
+  const body = el("div", "screen-body");
+  const dock = el("div", "screen-dock");
+  body.append(backLink());
+  body.append(el("h1", "", "Verbindungsfehler"));
+  body.append(el("p", "note is-bad", err?.message || "Das Spiel konnte nicht gestartet werden."));
+  const back = el("button", "btn primary", "Zur Auswahl");
+  back.type = "button";
+  back.addEventListener("click", () => {
+    leaveOnline().then(() => {
+      playMode = "online";
+      step = "mode";
+      render();
+    });
+  });
+  dock.append(back);
+  view.append(body, dock);
+  app.replaceChildren(view);
 }
 
 function backLink() {
@@ -299,7 +330,7 @@ async function publishState(next, options = {}) {
     try {
       await onlineApi.setState(next);
     } catch (err) {
-      toast(err?.message || "Zustand konnte nicht gesendet werden.");
+      reportError("Zustand schreiben", err);
     }
   }
   if (prevPhase !== "boom" && next?.phase === "boom") {
@@ -411,8 +442,8 @@ async function leaveOnline() {
   enteringOnline = false;
   try {
     await onlineApi?.leaveRoom?.();
-  } catch {
-    /* lokal trotzdem raus */
+  } catch (err) {
+    console.error("[tapper] Raum verlassen", err);
   }
   onlineRoom = null;
   state = null;
@@ -436,21 +467,36 @@ async function enterOnline() {
     lobbyHandle = lobbyMod.mountLobby(app, {
       gameId: "tapper",
       title: "Tapper",
-      lead: "Raum erstellen oder mit Code auf einem zweiten Handy beitreten.",
-      settings: draft,
+      lead: "Zuerst den Raum, dann die Regeln. Mitspielen geht per Code.",
       minPlayers: MIN_PLAYERS,
       maxPlayers: MAX_PLAYERS,
+      settingsPanel: {
+        initial: draft,
+        summarize: summarizeSettings,
+        render(container, { settings: current, onChange }) {
+          container.innerHTML = "";
+          appendSettingsControls(container, normalizeSettings(current), (next) => {
+            draft = next;
+            set(SETTINGS_KEY, next);
+            onChange(next);
+          });
+        },
+      },
       async onBeforeStart(room) {
         const players = room.players.slice(0, MAX_PLAYERS).map((player) => ({
           id: player.id,
           name: player.name,
         }));
-        const next = freshState(players, draft, allCategories());
+        const rules = normalizeSettings(room.settings || draft);
+        if (!letterCountOk(rules)) {
+          throw new Error("Mindestens einen Buchstaben einschalten.");
+        }
+        const next = freshState(players, rules, allCategories());
         await onlineApi.setState(next);
         state = next;
       },
       onStart(room) {
-        queueMicrotask(() => beginOnlinePlay(room));
+        beginOnlinePlay(room);
       },
       onLeave() {
         lobbyHandle = null;
@@ -463,58 +509,60 @@ async function enterOnline() {
   } catch (err) {
     enteringOnline = false;
     step = "mode";
-    toast(err?.message || "Online-Modus nicht verfügbar.");
+    reportError("Lobby", err);
     render();
   }
 }
 
 function beginOnlinePlay(room) {
-  lobbyHandle?.destroy();
-  lobbyHandle = null;
-  enteringOnline = false;
-  playMode = "online";
-  step = "play";
-  onlineRoom = room;
-  if (room?.state) adoptOnlineState(room.state);
-  clearOnlineSubs();
-  unsubRoom = onlineApi.onRoomChange((next) => {
-    if (!next || next.status === "kicked") {
-      const kicked = next?.status === "kicked";
-      leaveOnline().then(() => {
-        playMode = "online";
-        step = "mode";
-        toast(kicked ? "Du wurdest entfernt." : "Der Raum wurde geschlossen.");
-        render();
-      });
-      return;
-    }
-    onlineRoom = next;
-    if (next.state) adoptOnlineState(next.state);
-    else render();
-  });
-  unsubAction = onlineApi.onAction((action) => {
-    handleOnlineAction(action);
-  });
-  unsubNet = onlineApi.onConnectionChange((ok) => {
-    if (iAmHost() && ok) recoverHostAfterAway();
-    else render();
-  });
-  render();
+  try {
+    lobbyHandle?.destroy();
+    lobbyHandle = null;
+    enteringOnline = false;
+    playMode = "online";
+    step = "play";
+    onlineRoom = room;
+    const incoming = room?.state ? migrateState(room.state) : state;
+    if (incoming) adoptOnlineState(incoming);
+    clearOnlineSubs();
+    unsubRoom = onlineApi.onRoomChange((next) => {
+      if (!next || next.status === "kicked") {
+        const kicked = next?.status === "kicked";
+        leaveOnline().then(() => {
+          playMode = "online";
+          step = "mode";
+          toast(kicked ? "Du wurdest entfernt." : "Der Raum wurde geschlossen.");
+          render();
+        });
+        return;
+      }
+      onlineRoom = next;
+      if (next.state) adoptOnlineState(next.state);
+      else render();
+    });
+    unsubAction = onlineApi.onAction((action) => {
+      handleOnlineAction(action).catch((err) => reportError("Aktion", err));
+    });
+    unsubNet = onlineApi.onConnectionChange((ok) => {
+      if (iAmHost() && ok) recoverHostAfterAway().catch((err) => reportError("Host zurück", err));
+      else render();
+    });
+    if (!state) render();
+  } catch (err) {
+    showOnlineCrash(err);
+  }
 }
 
 function adoptOnlineState(next) {
   if (!next || typeof next !== "object") return;
+  const incoming = migrateState(next);
   const prevPhase = state?.phase;
-  const prevKey = lastTurnKey;
-  state = next;
-  if (prevPhase !== "boom" && next.phase === "boom") {
+  state = incoming;
+  if (prevPhase !== "boom" && incoming.phase === "boom") {
     playBoom();
     vibrateBoom();
   }
-  maybeSignalTurn(next);
-  if (state?.phase === "play" && lastTurnKey !== prevKey) {
-    /* Turn-Vibration in maybeSignalTurn */
-  }
+  maybeSignalTurn(incoming);
   render();
 }
 
@@ -571,7 +619,7 @@ async function onLetter(letter) {
     try {
       await onlineApi.sendAction({ type: "tap", payload: { letter } });
     } catch (err) {
-      toast(err?.message || "Aktion nicht gesendet.");
+      reportError("Buchstabe senden", err);
     }
     return;
   }
@@ -606,8 +654,7 @@ function renderMode() {
   onlineBtn.append(el("strong", "", "Online (mehrere Handys)"), el("small", "", "Jeder auf seinem Handy. Der Host steuert Timer und Regeln."));
   onlineBtn.addEventListener("click", () => {
     playMode = "online";
-    step = "settings";
-    render();
+    enterOnline();
   });
   body.append(localBtn, onlineBtn);
   view.append(body);
@@ -686,138 +733,98 @@ function renderPlayers() {
   app.replaceChildren(view);
 }
 
-function renderSettings() {
-  const view = el("section", "screen setup");
-  const body = el("div", "screen-body");
-  const dock = el("div", "screen-dock");
-  body.append(backLink());
-  body.append(el("h1", "", "Einstellungen"));
-  if (playMode === "online") {
-    body.append(el("p", "lead", "Wenn du den Raum erstellst, gelten diese Regeln für alle Handys. Mitspielen geht danach per Code."));
-  }
-
-  body.append(el("h2", "group-label", "Timer"));
+function appendSettingsControls(parent, current, apply) {
+  parent.append(el("h2", "group-label", "Timer"));
   const timers = el("div", "choices");
   for (const timer of Object.values(TIMERS)) {
-    const button = el("button", draft.timer === timer.id ? "choice is-on" : "choice");
+    const button = el("button", current.timer === timer.id ? "choice is-on" : "choice");
     button.type = "button";
     button.append(el("strong", "", timer.label), el("small", "", `${timer.min}–${timer.max} Sekunden, unsichtbar`));
-    button.addEventListener("click", () => {
-      draft = { ...draft, timer: timer.id };
-      render();
-    });
+    button.addEventListener("click", () => apply({ ...current, timer: timer.id }));
     timers.append(button);
   }
-  body.append(timers);
+  parent.append(timers);
 
-  body.append(el("h2", "group-label", "Punktesystem"));
-  const bombs = el("button", draft.scoring === "bombs" ? "choice is-on" : "choice");
+  parent.append(el("h2", "group-label", "Punktesystem"));
+  const bombs = el("button", current.scoring === "bombs" ? "choice is-on" : "choice");
   bombs.type = "button";
   bombs.append(el("strong", "", "Bombenpunkte"), el("small", "", "Wer explodiert, bekommt 1 Punkt. Die wenigsten Punkte gewinnen."));
-  bombs.addEventListener("click", () => {
-    draft = { ...draft, scoring: "bombs" };
-    render();
-  });
-  const live = el("button", draft.scoring === "survive" ? "choice is-on" : "choice");
+  bombs.addEventListener("click", () => apply({ ...current, scoring: "bombs" }));
+  const live = el("button", current.scoring === "survive" ? "choice is-on" : "choice");
   live.type = "button";
   live.append(el("strong", "", "Überleben"), el("small", "", "Alle außer dem Explodierten bekommen 1 Punkt. Die meisten Punkte gewinnen."));
-  live.addEventListener("click", () => {
-    draft = { ...draft, scoring: "survive", endMode: "rounds" };
-    render();
-  });
-  body.append(bombs, live);
+  live.addEventListener("click", () => apply({ ...current, scoring: "survive", endMode: "rounds" }));
+  parent.append(bombs, live);
 
-  body.append(el("h2", "group-label", "Kategorie"));
-  const listMode = el("button", draft.categoryMode === "list" ? "choice is-on" : "choice");
+  parent.append(el("h2", "group-label", "Kategorie"));
+  const listMode = el("button", current.categoryMode === "list" ? "choice is-on" : "choice");
   listMode.type = "button";
   listMode.append(el("strong", "", "Zufällig aus Liste"), el("small", "", "Eingebaute und eigene Kategorien, keine Wiederholung."));
-  listMode.addEventListener("click", () => {
-    draft = { ...draft, categoryMode: "list" };
-    render();
-  });
-  const freeMode = el("button", draft.categoryMode === "free" ? "choice is-on" : "choice");
+  listMode.addEventListener("click", () => apply({ ...current, categoryMode: "list" }));
+  const freeMode = el("button", current.categoryMode === "free" ? "choice is-on" : "choice");
   freeMode.type = "button";
   freeMode.append(el("strong", "", "Frei (selbst absprechen)"), el("small", "", "Ihr einigt euch vor jeder Runde auf eine Kategorie."));
-  freeMode.addEventListener("click", () => {
-    draft = { ...draft, categoryMode: "free" };
-    render();
-  });
-  body.append(listMode, freeMode);
+  freeMode.addEventListener("click", () => apply({ ...current, categoryMode: "free" }));
+  parent.append(listMode, freeMode);
 
-  body.append(el("h2", "group-label", "Spielende"));
-  if (draft.scoring === "bombs") {
-    const byRound = el("button", draft.endMode === "rounds" ? "choice is-on" : "choice");
+  parent.append(el("h2", "group-label", "Spielende"));
+  if (current.scoring === "bombs") {
+    const byRound = el("button", current.endMode === "rounds" ? "choice is-on" : "choice");
     byRound.type = "button";
     byRound.append(el("strong", "", "Nach Runden"));
-    byRound.addEventListener("click", () => {
-      draft = { ...draft, endMode: "rounds" };
-      render();
-    });
-    const byBombs = el("button", draft.endMode === "bombs" ? "choice is-on" : "choice");
+    byRound.addEventListener("click", () => apply({ ...current, endMode: "rounds" }));
+    const byBombs = el("button", current.endMode === "bombs" ? "choice is-on" : "choice");
     byBombs.type = "button";
     byBombs.append(el("strong", "", "Nach Bombenpunkten"));
-    byBombs.addEventListener("click", () => {
-      draft = { ...draft, endMode: "bombs" };
-      render();
-    });
-    body.append(byRound, byBombs);
+    byBombs.addEventListener("click", () => apply({ ...current, endMode: "bombs" }));
+    parent.append(byRound, byBombs);
   }
-  if (draft.scoring === "survive" || draft.endMode === "rounds") {
+  if (current.scoring === "survive" || current.endMode === "rounds") {
     const row = el("div", "btn-row");
     for (const count of ROUND_OPTIONS) {
-      const button = el("button", draft.rounds === count ? "btn primary" : "btn", `${count} Runden`);
+      const button = el("button", current.rounds === count ? "btn primary" : "btn", `${count} Runden`);
       button.type = "button";
-      button.addEventListener("click", () => {
-        draft = { ...draft, rounds: count };
-        render();
-      });
+      button.addEventListener("click", () => apply({ ...current, rounds: count }));
       row.append(button);
     }
-    body.append(row);
+    parent.append(row);
   }
-  if (draft.scoring === "bombs" && draft.endMode === "bombs") {
+  if (current.scoring === "bombs" && current.endMode === "bombs") {
     const row = el("div", "btn-row");
     for (const count of BOMB_OPTIONS) {
-      const button = el("button", draft.bombLimit === count ? "btn primary" : "btn", `${count} Bombenpunkte`);
+      const button = el("button", current.bombLimit === count ? "btn primary" : "btn", `${count} Bombenpunkte`);
       button.type = "button";
-      button.addEventListener("click", () => {
-        draft = { ...draft, bombLimit: count };
-        render();
-      });
+      button.addEventListener("click", () => apply({ ...current, bombLimit: count }));
       row.append(button);
     }
-    body.append(row);
+    parent.append(row);
   }
 
-  const tick = el("button", draft.tick ? "switch-row is-on" : "switch-row");
+  const tick = el("button", current.tick ? "switch-row is-on" : "switch-row");
   tick.type = "button";
   tick.setAttribute("role", "switch");
-  tick.setAttribute("aria-checked", draft.tick ? "true" : "false");
-  tick.append(el("strong", "", "Leises Ticken"), el("small", "", draft.tick ? "An: leises Ticken während eines Zugs." : "Aus: völlig still, bis es knallt."));
-  tick.addEventListener("click", () => {
-    draft = { ...draft, tick: !draft.tick };
-    render();
-  });
-  body.append(tick);
+  tick.setAttribute("aria-checked", current.tick ? "true" : "false");
+  tick.append(el("strong", "", "Leises Ticken"), el("small", "", current.tick ? "An: leises Ticken während eines Zugs." : "Aus: völlig still, bis es knallt."));
+  tick.addEventListener("click", () => apply({ ...current, tick: !current.tick }));
+  parent.append(tick);
 
-  body.append(el("h2", "group-label", "Buchstaben"));
-  body.append(el("p", "lead", "Standard ohne C, Q, X und Y."));
+  parent.append(el("h2", "group-label", "Buchstaben"));
+  parent.append(el("p", "lead", "Standard ohne C, Q, X und Y."));
   const toggles = el("div", "letter-toggles");
   for (const letter of ABC) {
-    const button = el("button", draft.letters[letter] ? "letter-toggle is-on" : "letter-toggle", letter);
+    const button = el("button", current.letters[letter] ? "letter-toggle is-on" : "letter-toggle", letter);
     button.type = "button";
-    button.setAttribute("aria-pressed", draft.letters[letter] ? "true" : "false");
-    button.addEventListener("click", () => {
-      draft = { ...draft, letters: { ...draft.letters, [letter]: !draft.letters[letter] } };
-      render();
-    });
+    button.setAttribute("aria-pressed", current.letters[letter] ? "true" : "false");
+    button.addEventListener("click", () =>
+      apply({ ...current, letters: { ...current.letters, [letter]: !current.letters[letter] } })
+    );
     toggles.append(button);
   }
-  body.append(toggles);
-  if (!letterCountOk(draft)) body.append(el("p", "note is-bad", "Mindestens einen Buchstaben einschalten."));
+  parent.append(toggles);
+  if (!letterCountOk(current)) parent.append(el("p", "note is-bad", "Mindestens einen Buchstaben einschalten."));
 
-  if (draft.categoryMode === "list") {
-    body.append(el("h2", "group-label", "Eigene Kategorien"));
+  if (current.categoryMode === "list") {
+    parent.append(el("h2", "group-label", "Eigene Kategorien"));
     const addRow = el("div", "preset");
     const input = document.createElement("input");
     input.className = "text-input";
@@ -835,11 +842,10 @@ function renderSettings() {
       }
       customCats = uniqueCategories([name, ...customCats]);
       set(CATS_KEY, customCats);
-      input.value = "";
-      render();
+      apply(current);
     });
     addRow.append(input, add);
-    body.append(addRow);
+    parent.append(addRow);
     for (const cat of customCats) {
       const row = el("div", "preset");
       row.append(el("span", "", cat));
@@ -848,30 +854,39 @@ function renderSettings() {
       del.addEventListener("click", () => {
         customCats = customCats.filter((item) => item !== cat);
         set(CATS_KEY, customCats);
-        render();
+        apply(current);
       });
       row.append(del);
-      body.append(row);
+      parent.append(row);
     }
   }
+}
 
-  const back = el("button", "btn", playMode === "online" ? "Zur Auswahl" : "Zu den Spielern");
-  back.type = "button";
-  back.addEventListener("click", () => {
-    step = playMode === "online" ? "mode" : "players";
+function renderSettings() {
+  const view = el("section", "screen setup");
+  const body = el("div", "screen-body");
+  const dock = el("div", "screen-dock");
+  body.append(backLink());
+  body.append(el("h1", "", "Einstellungen"));
+
+  appendSettingsControls(body, draft, (next) => {
+    draft = next;
     render();
   });
-  const go = el("button", "btn primary", playMode === "online" ? "Zur Lobby" : "Los geht’s");
+
+  const back = el("button", "btn", "Zu den Spielern");
+  back.type = "button";
+  back.addEventListener("click", () => {
+    step = "players";
+    render();
+  });
+  const go = el("button", "btn primary", "Los geht’s");
   go.type = "button";
   go.disabled = !letterCountOk(draft);
   go.addEventListener("click", () => {
     if (!letterCountOk(draft)) return;
     set(SETTINGS_KEY, draft);
     freeDraft = "";
-    if (playMode === "online") {
-      enterOnline();
-      return;
-    }
     state = freshState(names, draft, allCategories());
     saveGame();
     render();
@@ -920,7 +935,7 @@ function renderPlay() {
   const lettersBlocked = !state.started || state.paused || state.needCategory || hostMissing();
   const canTap = !lettersBlocked && (!isOnline() || isMyTurn());
   for (const letter of active) {
-    const locked = state.locked.includes(letter);
+    const locked = (state.locked || []).includes(letter);
     const watch = isOnline() && !isMyTurn() && !locked;
     const button = el("button", `letter${locked ? " is-locked" : ""}${watch ? " is-watch" : ""}`, letter);
     button.type = "button";
@@ -1148,7 +1163,7 @@ function renderEnd() {
       try {
         await onlineApi.sendAction({ type: "replay" });
       } catch (err) {
-        toast(err?.message || "Nicht gesendet.");
+        reportError("Nochmal", err);
       }
       return;
     }

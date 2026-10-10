@@ -15,6 +15,7 @@ import {
   onRoomChange,
   setPlayerOrder,
   startGame,
+  updateSettings,
 } from "./online.js";
 
 function el(tag, className, text) {
@@ -59,25 +60,38 @@ function errorMessage(err) {
   return err?.message || "Etwas ist schiefgelaufen.";
 }
 
+function showError(hint, err, sticky = true) {
+  console.error("[lobby]", err);
+  hint(errorMessage(err), sticky);
+}
+
 /**
- * Wiederverwendbare Lobby: Raum erstellen, beitreten, Spielerliste, Start.
+ * Wiederverwendbare Lobby: Raum erstellen/beitreten, optionale Einstellungen, Start.
+ *
+ * settingsPanel (optional):
+ *   { initial, summarize(settings), render(container, { settings, isHost, onChange }) }
+ *
  * @returns {{ destroy: () => void }}
  */
 export function mountLobby(root, options = {}) {
   const gameId = options.gameId || "game";
   const title = options.title || "Online-Spiel";
   const leadText = options.lead || "Raum erstellen oder mit einem Code beitreten.";
-  const settings = options.settings || {};
+  const settingsPanel = options.settingsPanel || null;
+  const settings = options.settings || settingsPanel?.initial || {};
   const onStart = options.onStart;
   const onBeforeStart = options.onBeforeStart;
   const onLeave = options.onLeave;
   const minPlayers = Math.max(1, Number(options.minPlayers) || 1);
   const maxPlayers = Math.max(minPlayers, Number(options.maxPlayers) || 99);
+  const joinPrefill = options.joinCode || joinCodeFromUrl() || "";
   let destroyed = false;
   let started = false;
   let snapshot = null;
   let hintTimer = 0;
   let unsubBadge = null;
+  let settingsOpen = false;
+  let entryStep = joinPrefill ? "join" : "choice";
 
   root.innerHTML = "";
   root.classList.add("lobby");
@@ -93,7 +107,13 @@ export function mountLobby(root, options = {}) {
     if (destroyed) return;
     if (next?.status === "playing" && !started) {
       started = true;
-      onStart?.(next);
+      try {
+        onStart?.(next);
+      } catch (err) {
+        started = false;
+        showError(hint, err, true);
+        render();
+      }
       return;
     }
     render();
@@ -142,12 +162,46 @@ export function mountLobby(root, options = {}) {
     hint(ok ? "Link kopiert" : url);
   }
 
+  function nameField(value = getStoredName()) {
+    const nameLabel = el("label", "lobby-field", "Dein Name");
+    const nameInput = el("input", "text-input");
+    nameInput.name = "name";
+    nameInput.autocomplete = "nickname";
+    nameInput.maxLength = 20;
+    nameInput.value = value;
+    nameLabel.append(nameInput);
+    return nameLabel;
+  }
+
+  function codeField(value = "") {
+    const codeLabel = el("label", "lobby-field", "Raumcode");
+    const codeInput = el("input", "text-input");
+    codeInput.name = "code";
+    codeInput.autocomplete = "off";
+    codeInput.spellcheck = false;
+    codeInput.maxLength = 4;
+    codeInput.placeholder = "z. B. K7P3";
+    codeInput.value = value;
+    codeInput.addEventListener("input", () => {
+      const caret = codeInput.selectionStart;
+      const next = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+      codeInput.value = next;
+      try {
+        codeInput.setSelectionRange(caret, caret);
+      } catch {
+        /* Mobil */
+      }
+    });
+    codeLabel.append(codeInput);
+    return codeLabel;
+  }
+
   async function onCreate() {
     const name = body.querySelector("[name=name]")?.value;
     try {
-      await createRoom(gameId, name, settings);
+      await createRoom(gameId, name, snapshot?.settings || settings);
     } catch (err) {
-      hint(errorMessage(err), true);
+      showError(hint, err, true);
     }
   }
 
@@ -157,11 +211,13 @@ export function mountLobby(root, options = {}) {
     try {
       await joinRoom(code, name);
     } catch (err) {
-      hint(errorMessage(err), true);
+      showError(hint, err, true);
     }
   }
 
   async function onStartClick() {
+    const startBtn = dock.querySelector(".btn.primary");
+    if (startBtn) startBtn.disabled = true;
     try {
       if (snapshot && snapshot.players.length < minPlayers) {
         hint(`Mindestens ${minPlayers} Spieler.`, true);
@@ -174,7 +230,21 @@ export function mountLobby(root, options = {}) {
       if (onBeforeStart) await onBeforeStart(snapshot);
       await startGame();
     } catch (err) {
-      hint(errorMessage(err), true);
+      showError(hint, err, true);
+    } finally {
+      if (!started && startBtn) startBtn.disabled = false;
+    }
+  }
+
+  async function onHostSettingsChange(next) {
+    if (!snapshot?.you?.isHost) return;
+    snapshot = { ...snapshot, settings: next };
+    const sum = body.querySelector(".lobby-settings-sum");
+    if (sum && settingsPanel?.summarize) sum.textContent = settingsPanel.summarize(next);
+    try {
+      await updateSettings(next);
+    } catch (err) {
+      showError(hint, err, true);
     }
   }
 
@@ -188,7 +258,7 @@ export function mountLobby(root, options = {}) {
     try {
       await setPlayerOrder(ids);
     } catch (err) {
-      hint(errorMessage(err));
+      showError(hint, err);
     }
   }
 
@@ -196,17 +266,18 @@ export function mountLobby(root, options = {}) {
     try {
       await kickPlayer(id);
     } catch (err) {
-      hint(errorMessage(err));
+      showError(hint, err);
     }
   }
 
   async function onExit() {
     try {
       await leaveRoom();
-    } catch {
-      /* lokal trotzdem zurück */
+    } catch (err) {
+      console.error("[lobby] Verlassen", err);
     }
     snapshot = null;
+    entryStep = "choice";
     onLeave?.();
     render();
   }
@@ -225,61 +296,113 @@ export function mountLobby(root, options = {}) {
     );
   }
 
-  function renderEntry() {
+  function appendHint() {
+    const note = el("p", "lobby-hint");
+    note.hidden = true;
+    body.append(note);
+    return note;
+  }
+
+  function renderChoice() {
     if (unsubBadge) {
       unsubBadge();
       unsubBadge = null;
     }
     body.innerHTML = "";
     dock.innerHTML = "";
-    const prefill = options.joinCode || joinCodeFromUrl() || "";
-    const name = getStoredName();
-
     body.append(el("p", "lobby-kicker", title));
     body.append(el("h1", null, "Zusammen spielen"));
     body.append(el("p", "lead", leadText));
-
-    const nameLabel = el("label", "lobby-field", "Dein Name");
-    const nameInput = el("input", "text-input");
-    nameInput.name = "name";
-    nameInput.autocomplete = "nickname";
-    nameInput.maxLength = 20;
-    nameInput.value = name;
-    nameLabel.append(nameInput);
-    body.append(nameLabel);
-
-    const codeLabel = el("label", "lobby-field", "Raumcode");
-    const codeInput = el("input", "text-input");
-    codeInput.name = "code";
-    codeInput.autocomplete = "off";
-    codeInput.spellcheck = false;
-    codeInput.maxLength = 4;
-    codeInput.placeholder = "z. B. K7P3";
-    codeInput.value = prefill;
-    codeInput.addEventListener("input", () => {
-      const caret = codeInput.selectionStart;
-      const next = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
-      codeInput.value = next;
-      try {
-        codeInput.setSelectionRange(caret, caret);
-      } catch {
-        /* Mobil */
-      }
+    const create = el("button", "choice");
+    create.type = "button";
+    create.append(el("strong", "", "Raum erstellen"), el("small", "", "Du bist Host: Code teilen, Regeln festlegen, starten."));
+    create.addEventListener("click", () => {
+      entryStep = "create";
+      render();
     });
-    codeLabel.append(codeInput);
-    body.append(codeLabel);
+    const join = el("button", "choice");
+    join.type = "button";
+    join.append(el("strong", "", "Raum beitreten"), el("small", "", "Mit Code oder Link auf ein bestehendes Spiel."));
+    join.addEventListener("click", () => {
+      entryStep = "join";
+      render();
+    });
+    body.append(create, join);
+    appendHint();
+  }
 
-    const note = el("p", "lobby-hint");
-    note.hidden = true;
-    body.append(note);
+  function renderCreate() {
+    if (unsubBadge) {
+      unsubBadge();
+      unsubBadge = null;
+    }
+    body.innerHTML = "";
+    dock.innerHTML = "";
+    body.append(el("p", "lobby-kicker", title));
+    body.append(el("h1", null, "Raum erstellen"));
+    body.append(el("p", "lead", "Name eingeben – der Raum wird sofort angelegt."));
+    body.append(nameField());
+    appendHint();
+    const go = el("button", "btn primary", "Raum erstellen");
+    go.type = "button";
+    go.addEventListener("click", onCreate);
+    const back = el("button", "btn", "Zurück");
+    back.type = "button";
+    back.addEventListener("click", () => {
+      entryStep = "choice";
+      render();
+    });
+    dock.append(go, back);
+  }
 
-    const createBtn = el("button", "btn primary", "Raum erstellen");
-    createBtn.type = "button";
-    createBtn.addEventListener("click", onCreate);
-    const joinBtn = el("button", "btn", "Beitreten");
-    joinBtn.type = "button";
-    joinBtn.addEventListener("click", onJoin);
-    dock.append(createBtn, joinBtn);
+  function renderJoin() {
+    if (unsubBadge) {
+      unsubBadge();
+      unsubBadge = null;
+    }
+    body.innerHTML = "";
+    dock.innerHTML = "";
+    body.append(el("p", "lobby-kicker", title));
+    body.append(el("h1", null, "Raum beitreten"));
+    body.append(el("p", "lead", "Code und Namen eingeben."));
+    body.append(nameField());
+    body.append(codeField(joinPrefill));
+    appendHint();
+    const go = el("button", "btn primary", "Beitreten");
+    go.type = "button";
+    go.addEventListener("click", onJoin);
+    const back = el("button", "btn", "Zurück");
+    back.type = "button";
+    back.addEventListener("click", () => {
+      entryStep = "choice";
+      render();
+    });
+    dock.append(go, back);
+  }
+
+  function renderSettingsBlock(room, host) {
+    if (!settingsPanel) return;
+    const current = room.settings && Object.keys(room.settings).length ? room.settings : settings;
+    if (settingsPanel.summarize) {
+      body.append(el("p", "lobby-settings-sum", settingsPanel.summarize(current)));
+    }
+    if (host && settingsPanel.render) {
+      const box = el("details", "lobby-settings");
+      box.open = settingsOpen;
+      box.addEventListener("toggle", () => {
+        settingsOpen = box.open;
+      });
+      const summary = el("summary", "", "Einstellungen");
+      box.append(summary);
+      const inner = el("div", "lobby-settings-body");
+      box.append(inner);
+      body.append(box);
+      settingsPanel.render(inner, {
+        settings: current,
+        isHost: true,
+        onChange: onHostSettingsChange,
+      });
+    }
   }
 
   function renderRoom(room) {
@@ -309,6 +432,8 @@ export function mountLobby(root, options = {}) {
       body.append(el("p", "lobby-code", room.code));
       body.append(el("p", "note", "Warten, bis die Runde startet."));
     }
+
+    renderSettingsBlock(room, host);
 
     body.append(el("h2", "lobby-list-title", "Spieler"));
     const list = el("ul", "lobby-players");
@@ -350,9 +475,7 @@ export function mountLobby(root, options = {}) {
     }
     body.append(list);
 
-    const note = el("p", "lobby-hint");
-    note.hidden = true;
-    body.append(note);
+    appendHint();
 
     if (room.status === "kicked") {
       body.append(el("p", "note is-bad", "Du wurdest entfernt."));
@@ -360,6 +483,7 @@ export function mountLobby(root, options = {}) {
       ok.type = "button";
       ok.addEventListener("click", () => {
         snapshot = null;
+        entryStep = "choice";
         render();
       });
       dock.append(ok);
@@ -393,7 +517,9 @@ export function mountLobby(root, options = {}) {
       renderRoom(snapshot);
       return;
     }
-    renderEntry();
+    if (entryStep === "create") renderCreate();
+    else if (entryStep === "join") renderJoin();
+    else renderChoice();
   }
 
   initOnline()
@@ -402,10 +528,11 @@ export function mountLobby(root, options = {}) {
     })
     .catch((err) => {
       if (destroyed) return;
+      console.error("[lobby] Anmeldung", err);
       if (err instanceof OnlineError && err.code === "offline") renderOffline();
       else {
-        renderEntry();
-        hint(errorMessage(err));
+        render();
+        hint(errorMessage(err), true);
       }
     });
 

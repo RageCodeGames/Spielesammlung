@@ -79,7 +79,54 @@ function fail(code, message) {
   throw new OnlineError(code, message);
 }
 
+function jsonSafe(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+/**
+ * Firebase speichert keine leeren Arrays – sie fehlen beim Lesen.
+ * Objekte mit Zahlen-Keys (selten) werden wie Arrays gelesen.
+ */
+export function readArray(value) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object") {
+    return Object.keys(value)
+      .sort((a, b) => Number(a) - Number(b))
+      .map((key) => value[key]);
+  }
+  return [];
+}
+
+/**
+ * Spielzustand nach dem Lesen aus Firebase absichern.
+ * undefined und leere Arrays fehlen in der Datenbank – hier wiederherstellen.
+ *
+ * @param {object|null|undefined} data
+ * @param {{ arrays?: string[], defaults?: Record<string, unknown> }} shape
+ *   arrays: Feldnamen, die immer Arrays sein müssen
+ *   defaults: fehlende/null-Werte; boolean/number werden typisiert
+ */
+export function normalizeRemote(data, shape = {}) {
+  if (!data || typeof data !== "object") return data;
+  const out = { ...data };
+  for (const key of shape.arrays || []) {
+    out[key] = readArray(data[key]);
+  }
+  const defaults = shape.defaults || {};
+  for (const [key, fallback] of Object.entries(defaults)) {
+    const raw = out[key];
+    if (raw == null) {
+      out[key] = fallback;
+      continue;
+    }
+    if (typeof fallback === "boolean") out[key] = !!raw;
+    else if (typeof fallback === "number") out[key] = Number(raw);
+  }
+  return out;
+}
+
 function rethrow(err) {
+  console.error("[online]", err);
   if (err instanceof OnlineError) throw err;
   const code = String(err?.code || "");
   const message = String(err?.message || "");
@@ -264,7 +311,8 @@ async function restoreSession() {
   try {
     await joinRoom(session.code, session.name || "Spieler");
     return true;
-  } catch {
+  } catch (err) {
+    console.error("[online] Sitzung konnte nicht wiederhergestellt werden", err);
     clearSession();
     return false;
   }
@@ -436,7 +484,7 @@ async function createRoomInner(newGameId, hostName, settings = {}) {
       hostId: uid,
       createdAt,
       status: "lobby",
-      settings: settings && typeof settings === "object" ? settings : {},
+      settings: jsonSafe(settings && typeof settings === "object" ? settings : {}),
     },
     players: {
       [uid]: {
@@ -561,7 +609,19 @@ export async function setState(state) {
     if (!roomCode) fail("no-room", "Kein Raum.");
     if (!isHost()) fail("not-host", "Nur der Host schreibt den Spielzustand.");
     const { ref, set: fbSet } = fb.dbMod;
-    await fbSet(ref(db, `rooms/${roomCode}/state`), state ?? null);
+    await fbSet(ref(db, `rooms/${roomCode}/state`), jsonSafe(state ?? null));
+  } catch (err) {
+    rethrow(err);
+  }
+}
+
+export async function updateSettings(settings) {
+  try {
+    await initOnline();
+    if (!roomCode) fail("no-room", "Kein Raum.");
+    if (!isHost()) fail("not-host", "Nur der Host ändert die Einstellungen.");
+    const { ref, update } = fb.dbMod;
+    await update(ref(db, `rooms/${roomCode}/meta`), { settings: jsonSafe(settings || {}) });
   } catch (err) {
     rethrow(err);
   }
@@ -588,8 +648,8 @@ export async function startGame() {
     await initOnline();
     if (!roomCode) fail("no-room", "Kein Raum.");
     if (!isHost()) fail("not-host", "Nur der Host kann das Spiel starten.");
-    const { ref, set: fbSet } = fb.dbMod;
-    await fbSet(ref(db, `rooms/${roomCode}/meta/status`), "playing");
+    const { ref, update } = fb.dbMod;
+    await update(ref(db, `rooms/${roomCode}/meta`), { status: "playing" });
   } catch (err) {
     rethrow(err);
   }
