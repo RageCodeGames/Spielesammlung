@@ -74,6 +74,13 @@ export function letterCountOk(settings) {
 }
 
 export function makePlayers(names) {
+  if (Array.isArray(names) && names[0] && typeof names[0] === "object") {
+    return names.slice(0, MAX_PLAYERS).map((player, index) => ({
+      id: player.id ?? index,
+      name: String(player.name || "").trim() || `Spieler ${index + 1}`,
+      score: 0,
+    }));
+  }
   const clean = names.map((name) => String(name || "").trim()).filter(Boolean).slice(0, MAX_PLAYERS);
   while (clean.length < MIN_PLAYERS) clean.push("");
   return clean.map((name, index) => ({ id: index, name: name || `Spieler ${index + 1}`, score: 0 }));
@@ -88,7 +95,7 @@ export function movePlayer(names, index, dir) {
 }
 
 export function freshState(players, settings, categories, rng = Math.random) {
-  const list = makePlayers(players.map((item) => (typeof item === "string" ? item : item.name)));
+  const list = makePlayers(players);
   const rules = normalizeSettings(settings);
   const free = isFreeMode(rules);
   const pool = uniqueCategories(categories);
@@ -108,6 +115,7 @@ export function freshState(players, settings, categories, rng = Math.random) {
     deadline: null,
     burst: null,
     needCategory: false,
+    waitingForHost: false,
   };
 }
 
@@ -118,6 +126,7 @@ export function migrateState(data) {
     ...data,
     settings,
     needCategory: !!data.needCategory,
+    waitingForHost: !!data.waitingForHost,
     category: data.category == null ? (isFreeMode(settings) ? FREE_LABEL : data.category) : data.category,
   };
 }
@@ -208,17 +217,31 @@ export function randomTurnMs(timerId, rng = Math.random) {
 export function startTurn(state, now = Date.now(), rng = Math.random) {
   if (state.phase !== "play" || state.needCategory) return state;
   const ms = randomTurnMs(state.settings.timer, rng);
-  return { ...state, started: true, paused: false, needCategory: false, deadline: now + ms };
+  return { ...state, started: true, paused: false, waitingForHost: false, needCategory: false, deadline: now + ms };
 }
 
 export function pause(state) {
   if (state.phase !== "play" || !state.started || state.paused || state.needCategory) return state;
-  return { ...state, paused: true, deadline: null };
+  return { ...state, paused: true, waitingForHost: false, deadline: null };
+}
+
+export function waitForHost(state) {
+  if (state.phase !== "play" || !state.started || state.needCategory) return state;
+  if (state.paused && state.waitingForHost) return state;
+  return { ...state, paused: true, waitingForHost: true, deadline: null };
 }
 
 export function resumeTurn(state, now = Date.now(), rng = Math.random) {
   if (state.phase !== "play" || !state.paused || state.needCategory) return state;
-  return startTurn({ ...state, paused: false }, now, rng);
+  return startTurn({ ...state, paused: false, waitingForHost: false }, now, rng);
+}
+
+export function skipCurrent(state, now = Date.now(), rng = Math.random) {
+  if (state.phase !== "play" || !state.started || state.paused || state.needCategory) {
+    return { state, effect: "ignore" };
+  }
+  const current = (state.current + 1) % state.players.length;
+  return { state: startTurn({ ...state, current }, now, rng), effect: "skip" };
 }
 
 export function tapLetter(state, letter, pool, now = Date.now(), rng = Math.random) {
@@ -283,6 +306,7 @@ export function explode(state) {
     phase: "boom",
     started: false,
     paused: false,
+    waitingForHost: false,
     needCategory: false,
     deadline: null,
     burst: players[current].name,
@@ -309,6 +333,7 @@ export function afterBoom(state, pool, rng = Math.random) {
       locked: [],
       started: false,
       paused: false,
+      waitingForHost: false,
       deadline: null,
       burst: null,
       needCategory: false,
@@ -325,6 +350,7 @@ export function afterBoom(state, pool, rng = Math.random) {
     locked: [],
     started: false,
     paused: false,
+    waitingForHost: false,
     deadline: null,
     burst: null,
     needCategory: false,

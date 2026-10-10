@@ -16,7 +16,6 @@ import {
   freshState,
   isFreeMode,
   isGameOver,
-  isRunning,
   letterCountOk,
   movePlayer,
   normalizeSettings,
@@ -29,9 +28,11 @@ import {
   resumeTurn,
   scoreLabel,
   setFreeCategory,
+  skipCurrent,
   startTurn,
   tapLetter,
   uniqueCategories,
+  waitForHost,
 } from "./logic.js";
 import { getAudioContext, isSoundEnabled, playTone, unlock } from "../../shared/sound.js";
 import { get, set } from "../../shared/storage.js";
@@ -43,9 +44,11 @@ const SETTINGS_KEY = "kajuete:tapper-settings";
 const NAMES_KEY = "kajuete:tapper-names";
 const CATS_KEY = "kajuete:tapper-kategorien";
 const FREE_KEY = "kajuete:tapper-freie-kategorien";
+const ROOM_SESSION_KEY = "kajuete:online-room";
 
 let state = null;
-let step = "players";
+let step = "mode";
+let playMode = "local";
 let names = get(NAMES_KEY, ["", ""]);
 let draft = normalizeSettings(get(SETTINGS_KEY, defaultSettings()));
 let customCats = uniqueCategories(get(CATS_KEY, []));
@@ -58,6 +61,16 @@ let toastTimer = 0;
 let tickTimer = 0;
 let boomTimer = 0;
 let deadlineTimer = 0;
+let onlineApi = null;
+let lobbyHandle = null;
+let onlineRoom = null;
+let unsubRoom = null;
+let unsubAction = null;
+let unsubNet = null;
+let unsubBadge = null;
+let userPausedBeforeWait = false;
+let lastTurnKey = "";
+let enteringOnline = false;
 
 const app = document.getElementById("app");
 
@@ -72,7 +85,45 @@ function pool() {
   return uniqueCategories([...CATEGORIES, ...customCats]);
 }
 
+function isOnline() {
+  return playMode === "online";
+}
+
+function iAmHost() {
+  return isOnline() && Boolean(onlineApi?.isHost());
+}
+
+function myId() {
+  return onlineApi?.getPlayerId?.() || null;
+}
+
+function isMyTurn(data = state) {
+  if (!data?.players?.length) return false;
+  if (!isOnline()) return true;
+  return data.players[data.current]?.id === myId();
+}
+
+function hostPlayer() {
+  return onlineRoom?.players?.find((player) => player.isHost) || null;
+}
+
+function hostMissing() {
+  if (!isOnline() || !onlineRoom || iAmHost()) return false;
+  if (state?.waitingForHost) return true;
+  const host = hostPlayer();
+  return Boolean(host) && host.online === false;
+}
+
+function currentSeatOnline() {
+  if (!isOnline() || !state) return true;
+  const seat = state.players[state.current];
+  if (!seat) return true;
+  const row = onlineRoom?.players?.find((player) => player.id === seat.id);
+  return row ? row.online !== false : true;
+}
+
 function saveGame() {
+  if (isOnline()) return;
   if (state && (state.phase === "play" || state.phase === "boom" || state.phase === "end")) set(GAME_KEY, state);
 }
 
@@ -98,6 +149,22 @@ function backLink() {
   return link;
 }
 
+function vibrateTurn() {
+  try {
+    navigator.vibrate?.([80, 50, 160]);
+  } catch {
+    /* Desktop oder iOS */
+  }
+}
+
+function vibrateBoom() {
+  try {
+    navigator.vibrate?.([200, 80, 280, 80, 420]);
+  } catch {
+    /* Desktop oder iOS */
+  }
+}
+
 function confirmDialog(message, onYes) {
   const back = el("div", "dialog-back");
   const dialog = el("div", "dialog");
@@ -120,6 +187,16 @@ function confirmDialog(message, onYes) {
 }
 
 function askNewGame() {
+  if (isOnline()) {
+    confirmDialog(iAmHost() ? "Raum schließen und neu beginnen?" : "Raum verlassen und neu beginnen?", () => {
+      leaveOnline().then(() => {
+        playMode = "local";
+        step = "mode";
+        render();
+      });
+    });
+    return;
+  }
   if (state && (state.phase === "play" || state.phase === "boom")) {
     confirmDialog("Neues Spiel beginnen? Der laufende Spielstand wird gelöscht.", startFresh);
     return;
@@ -132,7 +209,8 @@ function startFresh() {
   showingStandings = false;
   showingResume = false;
   state = null;
-  step = "players";
+  step = "mode";
+  playMode = "local";
   set(GAME_KEY, null);
   render();
 }
@@ -179,10 +257,10 @@ function appendFreeCategoryForm(parent, options = {}) {
   input.addEventListener("input", () => {
     freeDraft = input.value;
     if (!state || (state.started && !state.needCategory)) return;
-    state = setFreeCategory(state, freeDraft);
-    saveGame();
+    const next = setFreeCategory(state, freeDraft);
+    if (next !== state) publishState(next, { silent: true });
     const label = document.querySelector(".category");
-    if (label) label.textContent = displayCategory(state);
+    if (label) label.textContent = displayCategory(next);
   });
   parent.append(input);
   if (freeSuggestions.length) {
@@ -204,15 +282,47 @@ function appendFreeCategoryForm(parent, options = {}) {
   return input;
 }
 
+function maybeSignalTurn(next) {
+  if (!isOnline() || !next || next.phase !== "play" || !next.started || next.paused || next.needCategory) return;
+  if (!isMyTurn(next)) return;
+  const key = `${next.round}:${next.current}:${next.locked.join("")}`;
+  if (key === lastTurnKey) return;
+  lastTurnKey = key;
+  vibrateTurn();
+}
+
+async function publishState(next, options = {}) {
+  const prevPhase = state?.phase;
+  state = next;
+  if (!isOnline()) saveGame();
+  else if (iAmHost()) {
+    try {
+      await onlineApi.setState(next);
+    } catch (err) {
+      toast(err?.message || "Zustand konnte nicht gesendet werden.");
+    }
+  }
+  if (prevPhase !== "boom" && next?.phase === "boom") {
+    playBoom();
+    if (isOnline()) vibrateBoom();
+  }
+  maybeSignalTurn(next);
+  if (!options.silent) render();
+}
+
 function armTimer() {
   stopTimers();
   if (!state || state.phase !== "play" || !state.started || state.paused || state.needCategory || state.deadline == null) return;
-  const wait = Math.max(0, state.deadline - Date.now());
-  deadlineTimer = setTimeout(() => {
-    const result = checkDeadline(state, Date.now());
-    if (result.effect !== "boom") return;
-    burst(result);
-  }, wait);
+  if (hostMissing()) return;
+  const canExplode = !isOnline() || iAmHost();
+  if (canExplode) {
+    const wait = Math.max(0, state.deadline - Date.now());
+    deadlineTimer = setTimeout(() => {
+      const result = checkDeadline(state, Date.now());
+      if (result.effect !== "boom") return;
+      burst(result);
+    }, wait);
+  }
   if (state.settings.tick) {
     tickTimer = setInterval(() => {
       if (!isSoundEnabled()) return;
@@ -223,10 +333,7 @@ function armTimer() {
 
 function burst(result) {
   stopTimers();
-  state = result.state;
-  saveGame();
-  playBoom();
-  render();
+  publishState(result.state);
 }
 
 async function playBoom() {
@@ -265,6 +372,246 @@ function applyNames(next) {
   if (names.length > MAX_PLAYERS) names = names.slice(0, MAX_PLAYERS);
   saveNames();
   render();
+}
+
+function wantsOnline() {
+  try {
+    if (new URL(location.href).searchParams.get("join")) return true;
+  } catch {
+    /* egal */
+  }
+  const session = get(ROOM_SESSION_KEY, null);
+  return Boolean(session && session.gameId === "tapper");
+}
+
+function clearOnlineSubs() {
+  if (unsubRoom) {
+    unsubRoom();
+    unsubRoom = null;
+  }
+  if (unsubAction) {
+    unsubAction();
+    unsubAction = null;
+  }
+  if (unsubNet) {
+    unsubNet();
+    unsubNet = null;
+  }
+  if (unsubBadge) {
+    unsubBadge();
+    unsubBadge = null;
+  }
+}
+
+async function leaveOnline() {
+  stopTimers();
+  clearOnlineSubs();
+  lobbyHandle?.destroy();
+  lobbyHandle = null;
+  enteringOnline = false;
+  try {
+    await onlineApi?.leaveRoom?.();
+  } catch {
+    /* lokal trotzdem raus */
+  }
+  onlineRoom = null;
+  state = null;
+  lastTurnKey = "";
+}
+
+async function enterOnline() {
+  if (enteringOnline && lobbyHandle) return;
+  enteringOnline = true;
+  playMode = "online";
+  step = "lobby";
+  showingResume = false;
+  state = null;
+  try {
+    const [lobbyMod, api] = await Promise.all([
+      import("../../shared/lobby.js"),
+      import("../../shared/online.js"),
+    ]);
+    onlineApi = api;
+    lobbyHandle?.destroy();
+    lobbyHandle = lobbyMod.mountLobby(app, {
+      gameId: "tapper",
+      title: "Tapper",
+      lead: "Raum erstellen oder mit Code auf einem zweiten Handy beitreten.",
+      settings: draft,
+      minPlayers: MIN_PLAYERS,
+      maxPlayers: MAX_PLAYERS,
+      async onBeforeStart(room) {
+        const players = room.players.slice(0, MAX_PLAYERS).map((player) => ({
+          id: player.id,
+          name: player.name,
+        }));
+        const next = freshState(players, draft, allCategories());
+        await onlineApi.setState(next);
+        state = next;
+      },
+      onStart(room) {
+        queueMicrotask(() => beginOnlinePlay(room));
+      },
+      onLeave() {
+        lobbyHandle = null;
+        enteringOnline = false;
+        playMode = "online";
+        step = "mode";
+        render();
+      },
+    });
+  } catch (err) {
+    enteringOnline = false;
+    step = "mode";
+    toast(err?.message || "Online-Modus nicht verfügbar.");
+    render();
+  }
+}
+
+function beginOnlinePlay(room) {
+  lobbyHandle?.destroy();
+  lobbyHandle = null;
+  enteringOnline = false;
+  playMode = "online";
+  step = "play";
+  onlineRoom = room;
+  if (room?.state) adoptOnlineState(room.state);
+  clearOnlineSubs();
+  unsubRoom = onlineApi.onRoomChange((next) => {
+    if (!next || next.status === "kicked") {
+      const kicked = next?.status === "kicked";
+      leaveOnline().then(() => {
+        playMode = "online";
+        step = "mode";
+        toast(kicked ? "Du wurdest entfernt." : "Der Raum wurde geschlossen.");
+        render();
+      });
+      return;
+    }
+    onlineRoom = next;
+    if (next.state) adoptOnlineState(next.state);
+    else render();
+  });
+  unsubAction = onlineApi.onAction((action) => {
+    handleOnlineAction(action);
+  });
+  unsubNet = onlineApi.onConnectionChange((ok) => {
+    if (iAmHost() && ok) recoverHostAfterAway();
+    else render();
+  });
+  render();
+}
+
+function adoptOnlineState(next) {
+  if (!next || typeof next !== "object") return;
+  const prevPhase = state?.phase;
+  const prevKey = lastTurnKey;
+  state = next;
+  if (prevPhase !== "boom" && next.phase === "boom") {
+    playBoom();
+    vibrateBoom();
+  }
+  maybeSignalTurn(next);
+  if (state?.phase === "play" && lastTurnKey !== prevKey) {
+    /* Turn-Vibration in maybeSignalTurn */
+  }
+  render();
+}
+
+async function handleOnlineAction(action) {
+  if (!iAmHost() || !state) return;
+  if (action.type === "tap") {
+    const late = checkDeadline(state, Date.now());
+    if (late.effect === "boom") {
+      burst(late);
+      return;
+    }
+    const current = state.players[state.current];
+    if (!current || action.from !== current.id) return;
+    const tapped = tapLetter(state, action.payload?.letter, allCategories(), Date.now());
+    if (tapped.effect === "ignore") return;
+    if (tapped.effect === "need-category") freeDraft = "";
+    await publishState(tapped.state);
+    return;
+  }
+  if (action.type === "replay") {
+    freeDraft = "";
+    await publishState(replay(state, allCategories()));
+  }
+}
+
+async function recoverHostAfterAway() {
+  if (!iAmHost() || !state || state.phase !== "play" || !state.started) return;
+  if (state.needCategory) return;
+  if (state.waitingForHost) {
+    if (userPausedBeforeWait) {
+      userPausedBeforeWait = false;
+      await publishState({ ...state, waitingForHost: false, paused: true, deadline: null });
+      return;
+    }
+    await publishState(resumeTurn(state, Date.now()));
+    return;
+  }
+  if (!state.paused && state.deadline != null && Date.now() >= state.deadline) {
+    await publishState(resumeTurn({ ...state, paused: true }, Date.now()));
+  }
+}
+
+async function hostGoAway() {
+  if (!iAmHost() || !state || state.phase !== "play" || !state.started || state.needCategory) return;
+  userPausedBeforeWait = state.paused && !state.waitingForHost;
+  const next = waitForHost(state);
+  if (next !== state) await publishState(next);
+}
+
+async function onLetter(letter) {
+  if (!state) return;
+  if (isOnline() && !isMyTurn()) return;
+  if (isOnline() && !iAmHost()) {
+    try {
+      await onlineApi.sendAction({ type: "tap", payload: { letter } });
+    } catch (err) {
+      toast(err?.message || "Aktion nicht gesendet.");
+    }
+    return;
+  }
+  const late = checkDeadline(state, Date.now());
+  if (late.effect === "boom") {
+    burst(late);
+    return;
+  }
+  const tapped = tapLetter(state, letter, allCategories(), Date.now());
+  if (tapped.effect === "ignore") return;
+  if (tapped.effect === "need-category") freeDraft = "";
+  await publishState(tapped.state);
+}
+
+function renderMode() {
+  const view = el("section", "screen setup");
+  const body = el("div", "screen-body");
+  body.append(backLink());
+  body.append(el("h1", "", "Tapper"));
+  body.append(el("p", "lead", "Wie wollt ihr spielen?"));
+  if (bootNotice) body.append(el("p", "note is-bad", bootNotice));
+  const localBtn = el("button", "choice", "");
+  localBtn.type = "button";
+  localBtn.append(el("strong", "", "Ein Handy"), el("small", "", "Ein Gerät in die Mitte. Wer dran ist, tippt den Buchstaben."));
+  localBtn.addEventListener("click", () => {
+    playMode = "local";
+    step = "players";
+    render();
+  });
+  const onlineBtn = el("button", "choice", "");
+  onlineBtn.type = "button";
+  onlineBtn.append(el("strong", "", "Online (mehrere Handys)"), el("small", "", "Jeder auf seinem Handy. Der Host steuert Timer und Regeln."));
+  onlineBtn.addEventListener("click", () => {
+    playMode = "online";
+    step = "settings";
+    render();
+  });
+  body.append(localBtn, onlineBtn);
+  view.append(body);
+  app.replaceChildren(view);
 }
 
 function renderPlayers() {
@@ -328,7 +675,13 @@ function renderPlayers() {
     step = "settings";
     render();
   });
-  dock.append(next);
+  const back = el("button", "btn", "Zur Auswahl");
+  back.type = "button";
+  back.addEventListener("click", () => {
+    step = "mode";
+    render();
+  });
+  dock.append(next, back);
   view.append(body, dock);
   app.replaceChildren(view);
 }
@@ -339,6 +692,9 @@ function renderSettings() {
   const dock = el("div", "screen-dock");
   body.append(backLink());
   body.append(el("h1", "", "Einstellungen"));
+  if (playMode === "online") {
+    body.append(el("p", "lead", "Wenn du den Raum erstellst, gelten diese Regeln für alle Handys. Mitspielen geht danach per Code."));
+  }
 
   body.append(el("h2", "group-label", "Timer"));
   const timers = el("div", "choices");
@@ -499,19 +855,23 @@ function renderSettings() {
     }
   }
 
-  const back = el("button", "btn", "Zu den Spielern");
+  const back = el("button", "btn", playMode === "online" ? "Zur Auswahl" : "Zu den Spielern");
   back.type = "button";
   back.addEventListener("click", () => {
-    step = "players";
+    step = playMode === "online" ? "mode" : "players";
     render();
   });
-  const go = el("button", "btn primary", "Los geht’s");
+  const go = el("button", "btn primary", playMode === "online" ? "Zur Lobby" : "Los geht’s");
   go.type = "button";
   go.disabled = !letterCountOk(draft);
   go.addEventListener("click", () => {
     if (!letterCountOk(draft)) return;
     set(SETTINGS_KEY, draft);
     freeDraft = "";
+    if (playMode === "online") {
+      enterOnline();
+      return;
+    }
     state = freshState(names, draft, allCategories());
     saveGame();
     render();
@@ -527,19 +887,28 @@ function renderPlay() {
   const dock = el("div", "screen-dock");
   const bar = el("div", "play-bar");
   bar.append(backLink());
+  if (isOnline()) {
+    const badge = el("div");
+    if (unsubBadge) unsubBadge();
+    unsubBadge = onlineApi.mountConnectionBadge(badge);
+    bar.append(badge);
+  }
   const standingsBtn = el("button", "btn", "Stand");
   standingsBtn.type = "button";
   standingsBtn.addEventListener("click", () => {
     showingStandings = true;
     render();
   });
-  const fresh = el("button", "btn", "Neues Spiel");
+  const fresh = el("button", "btn", isOnline() ? (iAmHost() ? "Raum schließen" : "Verlassen") : "Neues Spiel");
   fresh.type = "button";
   fresh.addEventListener("click", askNewGame);
   bar.append(el("span", "spacer"), standingsBtn, fresh);
   body.append(bar);
+
   const who = state.players[state.current];
-  body.append(el("p", "who", who.name));
+  const myTurn = isOnline() && isMyTurn() && state.started && !state.paused && !state.needCategory && !hostMissing();
+  if (myTurn) body.append(el("p", "your-turn", "DU BIST DRAN!"));
+  body.append(el("p", "who", who?.name || "Spieler"));
   body.append(el("p", "category", displayCategory(state)));
   const hint = state.settings.endMode === "bombs" && state.settings.scoring === "bombs"
     ? `Runde ${state.round} · bis ${state.settings.bombLimit} Bombenpunkte`
@@ -548,94 +917,107 @@ function renderPlay() {
 
   const grid = el("div", "letters");
   const active = enabledLetters(state.settings);
-  const lettersBlocked = !state.started || state.paused || state.needCategory;
+  const lettersBlocked = !state.started || state.paused || state.needCategory || hostMissing();
+  const canTap = !lettersBlocked && (!isOnline() || isMyTurn());
   for (const letter of active) {
     const locked = state.locked.includes(letter);
-    const button = el("button", locked ? "letter is-locked" : "letter", letter);
+    const watch = isOnline() && !isMyTurn() && !locked;
+    const button = el("button", `letter${locked ? " is-locked" : ""}${watch ? " is-watch" : ""}`, letter);
     button.type = "button";
-    button.disabled = locked || lettersBlocked;
-    button.addEventListener("click", () => {
-      const late = checkDeadline(state, Date.now());
-      if (late.effect === "boom") {
-        burst(late);
-        return;
-      }
-      const tapped = tapLetter(state, letter, allCategories(), Date.now());
-      if (tapped.effect === "ignore") return;
-      state = tapped.state;
-      if (tapped.effect === "need-category") freeDraft = "";
-      saveGame();
-      render();
-    });
+    button.disabled = locked || !canTap;
+    button.addEventListener("click", () => onLetter(letter));
     grid.append(button);
   }
   body.append(grid);
 
+  const hostControls = !isOnline() || iAmHost();
   if (!state.started) {
     let freeField = null;
-    if (isFreeMode(state.settings)) {
+    if (isFreeMode(state.settings) && hostControls) {
       freeField = appendFreeCategoryForm(dock, {
         title: "Sprecht eine Kategorie ab",
       });
+    } else if (isFreeMode(state.settings)) {
+      dock.append(el("p", "lead", "Der Host legt die Kategorie fest."));
     }
-    const start = el("button", "btn primary", "Start");
-    start.type = "button";
-    start.addEventListener("click", () => {
-      if (isFreeMode(state.settings)) {
-        const typed = freeField ? freeField.value : freeDraft;
-        rememberFreeCategory(typed);
-        state = setFreeCategory(state, typed);
-        freeDraft = "";
-      }
-      state = startTurn(state, Date.now());
-      saveGame();
-      render();
-      unlock();
-    });
-    dock.append(start);
-    if (!isFreeMode(state.settings)) {
-      const other = el("button", "btn", "Andere Kategorie");
-      other.type = "button";
-      other.addEventListener("click", () => {
-        state = otherCategory(state, allCategories());
-        saveGame();
-        render();
+    if (hostControls) {
+      const start = el("button", "btn primary", "Start");
+      start.type = "button";
+      start.addEventListener("click", () => {
+        if (isFreeMode(state.settings)) {
+          const typed = freeField ? freeField.value : freeDraft;
+          rememberFreeCategory(typed);
+          state = setFreeCategory(state, typed);
+          freeDraft = "";
+        }
+        publishState(startTurn(state, Date.now()));
+        unlock();
       });
-      dock.append(other);
+      dock.append(start);
+      if (!isFreeMode(state.settings)) {
+        const other = el("button", "btn", "Andere Kategorie");
+        other.type = "button";
+        other.addEventListener("click", () => {
+          publishState(otherCategory(state, allCategories()));
+        });
+        dock.append(other);
+      }
+    } else {
+      dock.append(el("p", "lead", "Warten auf den Host …"));
     }
   } else if (!state.needCategory) {
-    const invalid = el("button", "btn", "Ungültig");
-    invalid.type = "button";
-    invalid.disabled = state.paused;
-    invalid.addEventListener("click", () => {
-      const late = checkDeadline(state, Date.now());
-      if (late.effect === "boom") {
-        burst(late);
-        return;
+    if (hostControls) {
+      const invalid = el("button", "btn", "Ungültig");
+      invalid.type = "button";
+      invalid.disabled = state.paused;
+      invalid.addEventListener("click", () => {
+        const late = checkDeadline(state, Date.now());
+        if (late.effect === "boom") {
+          burst(late);
+          return;
+        }
+        const rejected = rejectTerm(state);
+        if (rejected.effect !== "boom") return;
+        burst(rejected);
+      });
+      const pauseBtn = el("button", "btn", "Pause");
+      pauseBtn.type = "button";
+      pauseBtn.disabled = state.paused;
+      pauseBtn.addEventListener("click", () => {
+        publishState(pause(state));
+      });
+      const row = el("div", "btn-row");
+      row.append(invalid, pauseBtn);
+      dock.append(row);
+      if (isOnline() && !currentSeatOnline() && !state.paused) {
+        const skip = el("button", "btn", `${who?.name || "Spieler"} überspringen`);
+        skip.type = "button";
+        skip.addEventListener("click", () => {
+          const result = skipCurrent(state, Date.now());
+          if (result.effect === "ignore") return;
+          publishState(result.state);
+        });
+        dock.append(skip);
       }
-      const rejected = rejectTerm(state);
-      if (rejected.effect !== "boom") return;
-      burst(rejected);
-    });
-    const pauseBtn = el("button", "btn", "Pause");
-    pauseBtn.type = "button";
-    pauseBtn.disabled = state.paused;
-    pauseBtn.addEventListener("click", () => {
-      state = pause(state);
-      saveGame();
-      render();
-    });
-    const row = el("div", "btn-row");
-    row.append(invalid, pauseBtn);
-    dock.append(row);
+    }
   }
 
   view.append(body, dock);
   app.replaceChildren(view);
-  if (state.needCategory) renderNeedCategory();
+  if (hostMissing() && state.started) renderWaitHost();
+  else if (state.needCategory) renderNeedCategory();
   else if (state.paused) renderPause();
   if (showingStandings) renderStandings(false);
   armTimer();
+}
+
+function renderWaitHost() {
+  const back = el("div", "pause-back");
+  const card = el("div", "dialog");
+  card.append(el("strong", "", "Warte auf Host"));
+  card.append(el("p", "lead", "Der Timer ist angehalten. Weiter geht’s, sobald der Host wieder da ist."));
+  back.append(card);
+  app.append(back);
 }
 
 function renderNeedCategory() {
@@ -643,6 +1025,13 @@ function renderNeedCategory() {
   const card = el("div", "dialog");
   card.setAttribute("role", "dialog");
   card.setAttribute("aria-modal", "true");
+  if (isOnline() && !iAmHost()) {
+    card.append(el("strong", "", "Neue Kategorie"));
+    card.append(el("p", "lead", "Der Host legt die nächste freie Kategorie fest."));
+    back.append(card);
+    app.append(back);
+    return;
+  }
   const field = appendFreeCategoryForm(card, {
     title: "Alle Buchstaben weg – neue Kategorie absprechen",
   });
@@ -651,10 +1040,8 @@ function renderNeedCategory() {
   go.addEventListener("click", () => {
     const typed = field.value;
     rememberFreeCategory(typed);
-    state = continueFreeCategory(state, typed, Date.now());
     freeDraft = "";
-    saveGame();
-    render();
+    publishState(continueFreeCategory(state, typed, Date.now()));
     unlock();
   });
   card.append(go);
@@ -667,18 +1054,22 @@ function renderPause() {
   const back = el("div", "pause-back");
   const card = el("div", "dialog");
   card.append(el("strong", "", "Pausiert"));
-  const go = el("button", "btn primary", "Weiter");
-  go.type = "button";
-  go.addEventListener("click", () => {
-    state = resumeTurn(state, Date.now());
-    saveGame();
-    render();
-    unlock();
-  });
-  card.append(go);
+  if (!isOnline() || iAmHost()) {
+    const go = el("button", "btn primary", "Weiter");
+    go.type = "button";
+    go.addEventListener("click", () => {
+      publishState(resumeTurn(state, Date.now()));
+      unlock();
+    });
+    card.append(go);
+    back.append(card);
+    app.append(back);
+    go.focus();
+    return;
+  }
+  card.append(el("p", "lead", "Der Host hat pausiert."));
   back.append(card);
   app.append(back);
-  go.focus();
 }
 
 function rankList(stateNow) {
@@ -719,14 +1110,16 @@ function renderBoom() {
   body.append(el("p", "who", state.burst || state.players[state.current].name));
   body.append(el("p", "lead", isGameOver(state) ? "Das Spiel ist aus." : "Kurzer Zwischenstand"));
   body.append(rankList(state));
-  const next = el("button", "btn primary", isGameOver(state) ? "Zur Rangliste" : "Nächste Runde");
-  next.type = "button";
-  next.addEventListener("click", () => {
-    state = afterBoom(state, allCategories());
-    saveGame();
-    render();
-  });
-  dock.append(next);
+  if (!isOnline() || iAmHost()) {
+    const next = el("button", "btn primary", isGameOver(state) ? "Zur Rangliste" : "Nächste Runde");
+    next.type = "button";
+    next.addEventListener("click", () => {
+      publishState(afterBoom(state, allCategories()));
+    });
+    dock.append(next);
+  } else {
+    dock.append(el("p", "lead", isGameOver(state) ? "Warten auf den Host …" : "Der Host startet die nächste Runde."));
+  }
   view.append(body, dock);
   const flash = el("div", "boom-back");
   const card = el("div", "boom-card");
@@ -750,10 +1143,17 @@ function renderEnd() {
   body.append(rankList(state));
   const again = el("button", "btn primary", "Nochmal");
   again.type = "button";
-  again.addEventListener("click", () => {
-    state = replay(state, allCategories());
-    saveGame();
-    render();
+  again.addEventListener("click", async () => {
+    if (isOnline() && !iAmHost()) {
+      try {
+        await onlineApi.sendAction({ type: "replay" });
+      } catch (err) {
+        toast(err?.message || "Nicht gesendet.");
+      }
+      return;
+    }
+    freeDraft = "";
+    publishState(replay(state, allCategories()));
   });
   const hub = el("a", "btn", "Zum Hub");
   hub.href = "../../index.html";
@@ -785,13 +1185,29 @@ function renderResume() {
 
 function render() {
   document.body.classList.toggle("is-play", Boolean(state && state.phase === "play"));
+  if (unsubBadge && (step !== "play" || state?.phase !== "play")) {
+    unsubBadge();
+    unsubBadge = null;
+  }
+  if (step === "lobby") return;
   if (showingResume) {
     renderResume();
     return;
   }
+  if (step === "play" && !state) {
+    const view = el("section", "screen setup");
+    const body = el("div", "screen-body");
+    body.append(backLink());
+    body.append(el("h1", "", "Tapper"));
+    body.append(el("p", "note", "Warten auf den Host …"));
+    view.append(body);
+    app.replaceChildren(view);
+    return;
+  }
   if (!state) {
     if (step === "settings") renderSettings();
-    else renderPlayers();
+    else if (step === "players") renderPlayers();
+    else renderMode();
     return;
   }
   if (state.phase === "play") renderPlay();
@@ -804,6 +1220,12 @@ function boot() {
   requestWakeLock();
   initUpdates();
   if (!Array.isArray(names) || names.length < MIN_PLAYERS) names = ["", ""];
+  if (wantsOnline()) {
+    playMode = "online";
+    step = "lobby";
+    enterOnline();
+    return;
+  }
   const loaded = readSave(get(GAME_KEY, null));
   bootNotice = loaded.notice;
   if (loaded.notice) set(GAME_KEY, null);
@@ -812,17 +1234,28 @@ function boot() {
     names = state.players.map((player) => player.name);
     draft = normalizeSettings(state.settings);
     showingResume = true;
+    step = "players";
+    playMode = "local";
   }
   render();
 }
 
 document.addEventListener("visibilitychange", () => {
+  if (isOnline()) {
+    if (!iAmHost()) return;
+    if (document.visibilityState === "hidden") hostGoAway();
+    else recoverHostAfterAway();
+    return;
+  }
   if (document.visibilityState !== "hidden") return;
   if (!state || state.phase !== "play" || !state.started || state.paused || state.needCategory) return;
   state = pause(state);
   saveGame();
   render();
 });
-window.addEventListener("pagehide", saveGame);
+window.addEventListener("pagehide", () => {
+  if (isOnline() && iAmHost()) hostGoAway();
+  else saveGame();
+});
 
 boot();

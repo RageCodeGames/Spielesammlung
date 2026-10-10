@@ -69,7 +69,10 @@ export function mountLobby(root, options = {}) {
   const leadText = options.lead || "Raum erstellen oder mit einem Code beitreten.";
   const settings = options.settings || {};
   const onStart = options.onStart;
+  const onBeforeStart = options.onBeforeStart;
   const onLeave = options.onLeave;
+  const minPlayers = Math.max(1, Number(options.minPlayers) || 1);
+  const maxPlayers = Math.max(minPlayers, Number(options.maxPlayers) || 99);
   let destroyed = false;
   let started = false;
   let snapshot = null;
@@ -160,6 +163,15 @@ export function mountLobby(root, options = {}) {
 
   async function onStartClick() {
     try {
+      if (snapshot && snapshot.players.length < minPlayers) {
+        hint(`Mindestens ${minPlayers} Spieler.`, true);
+        return;
+      }
+      if (snapshot && snapshot.players.length > maxPlayers) {
+        hint(`Höchstens ${maxPlayers} Spieler – bitte welche entfernen.`, true);
+        return;
+      }
+      if (onBeforeStart) await onBeforeStart(snapshot);
       await startGame();
     } catch (err) {
       hint(errorMessage(err), true);
@@ -355,8 +367,13 @@ export function mountLobby(root, options = {}) {
     }
 
     if (host) {
+      const tooFew = room.players.length < minPlayers;
+      const tooMany = room.players.length > maxPlayers;
+      if (tooFew) body.append(el("p", "note", `Mindestens ${minPlayers} Spieler.`));
+      if (tooMany) body.append(el("p", "note is-bad", `Höchstens ${maxPlayers} Spieler – bitte welche entfernen.`));
       const startBtn = el("button", "btn primary", "Spiel starten");
       startBtn.type = "button";
+      startBtn.disabled = tooFew || tooMany;
       startBtn.addEventListener("click", onStartClick);
       dock.append(startBtn);
     }
