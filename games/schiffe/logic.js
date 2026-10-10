@@ -148,6 +148,85 @@ export function emptyGrid(width, height) {
   return Array.from({ length: height }, () => Array(width).fill(null));
 }
 
+/** Schüsse als Objekt mit Schlüssel "c_r" – Firebase-sicher (keine null-Lücken). */
+export function cellKey(c, r) {
+  return `${Number(c)}_${Number(r)}`;
+}
+
+export function emptyBoard() {
+  return {};
+}
+
+export function readMark(board, c, r) {
+  if (!board) return null;
+  if (Array.isArray(board)) return board[r]?.[c] || null;
+  return board[cellKey(c, r)] || null;
+}
+
+export function writeMark(board, c, r, mark) {
+  if (Array.isArray(board)) {
+    board[r][c] = mark;
+    return board;
+  }
+  const key = cellKey(c, r);
+  if (mark == null) delete board[key];
+  else board[key] = mark;
+  return board;
+}
+
+export function copyBoard(board) {
+  return normalizeBoard(board);
+}
+
+export function normalizeBoard(raw, width = 0, height = 0) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  if (Array.isArray(raw)) {
+    const rows = height || raw.length;
+    for (let r = 0; r < rows; r += 1) {
+      const row = raw[r];
+      if (row == null) continue;
+      if (Array.isArray(row)) {
+        const cols = width || row.length;
+        for (let c = 0; c < cols; c += 1) {
+          if (row[c] && typeof row[c] === "object") out[cellKey(c, r)] = { ...row[c] };
+        }
+      } else if (typeof row === "object") {
+        for (const [cStr, cell] of Object.entries(row)) {
+          if (cell && typeof cell === "object" && (cell.kind || cell.result)) {
+            out[cellKey(Number(cStr), r)] = { ...cell };
+          }
+        }
+      }
+    }
+    return out;
+  }
+  for (const [key, value] of Object.entries(raw)) {
+    if (!value || typeof value !== "object") continue;
+    if (value.kind || value.result) {
+      if (/^\d+_\d+$/.test(key)) out[key] = { ...value };
+      continue;
+    }
+    const r = Number(key);
+    if (!Number.isFinite(r)) continue;
+    for (const [cStr, cell] of Object.entries(value)) {
+      if (cell && typeof cell === "object" && (cell.kind || cell.result)) {
+        out[cellKey(Number(cStr), r)] = { ...cell };
+      }
+    }
+  }
+  return out;
+}
+
+function migrateBoards(state) {
+  if (!state || typeof state !== "object") return state;
+  return {
+    ...state,
+    enemy: normalizeBoard(state.enemy, state.width, state.height),
+    incoming: normalizeBoard(state.incoming, state.width, state.height),
+  };
+}
+
 export function expandFleet(rules) {
   const ships = [];
   for (const shape of SHAPES) {
@@ -181,8 +260,8 @@ export function freshState() {
     selectedId: null,
     rotation: 0,
     mirror: false,
-    enemy: emptyGrid(rules.width, rules.height),
-    incoming: emptyGrid(rules.width, rules.height),
+    enemy: emptyBoard(),
+    incoming: emptyBoard(),
     enemyFleet: [],
     nextGroup: 1,
     shotLog: [],
@@ -194,7 +273,7 @@ export function freshState() {
 export function isRunning(data) {
   if (!data || data.version !== 2) return false;
   if (!["place", "battle", "end"].includes(data.phase)) return false;
-  if (!validGrid(data.enemy, data.width, data.height) || !validGrid(data.incoming, data.width, data.height)) return false;
+  if (!validBoard(data.enemy) || !validBoard(data.incoming)) return false;
   if (!Array.isArray(data.ships) || !data.ships.every((ship) => ship && SHAPE_BY_ID[ship.shapeId])) return false;
   if (!Array.isArray(data.enemyFleet) || !data.rules) return false;
   if (data.versus === "bot") {
@@ -208,7 +287,7 @@ export function isRunning(data) {
 
 export function readSave(data) {
   try {
-    if (isRunning(data)) return { state: data, notice: null };
+    if (isRunning(data)) return { state: migrateBoards(data), notice: null };
     if (data && data.version === 2 && data.phase === "setup") return { state: freshState(), notice: null };
     if (data && typeof data === "object" && (data.version || data.phase || data.ships)) {
       return { state: freshState(), notice: "Der gespeicherte Spielstand passt nicht mehr zur neuen Version und wurde verworfen." };
@@ -306,8 +385,8 @@ export function beginPlacement(rules, extras = null) {
     selectedId: ships[0]?.id ?? null,
     rotation: 0,
     mirror: false,
-    enemy: emptyGrid(rules.width, rules.height),
-    incoming: emptyGrid(rules.width, rules.height),
+    enemy: emptyBoard(),
+    incoming: emptyBoard(),
     enemyFleet: ships.map((ship) => ({
       shapeId: ship.shapeId,
       name: ship.name,
@@ -414,16 +493,16 @@ export function markEnemy(state, c, r, kind) {
   if (state.phase !== "battle" || kind === "cancel") return { state, error: null, choice: null };
   if (kind === "sunk") return startSunk(state, c, r);
   const next = snapshot(state);
-  const existing = next.enemy[r][c];
+  const existing = readMark(next.enemy, c, r);
   if (existing?.group != null) clearGroup(next, existing.group);
-  next.enemy[r][c] = { kind, auto: false, group: null };
+  writeMark(next.enemy, c, r, { kind, auto: false, group: null });
   return { state: next, error: null, choice: null };
 }
 
 export function commitSunk(state, c, r, slotIndex) {
   if (state.phase !== "battle") return { state, error: "Das geht gerade nicht." };
   const next = snapshot(state);
-  const existing = next.enemy[r][c];
+  const existing = readMark(next.enemy, c, r);
   if (existing?.group != null) clearGroup(next, existing.group);
   const report = inspectSunk(next, c, r);
   const option = report.options.find((item) => item.index === slotIndex);
@@ -434,23 +513,25 @@ export function commitSunk(state, c, r, slotIndex) {
 
 export function fireIncoming(state, c, r) {
   if (state.phase !== "battle") return { state, result: "ignore" };
-  if (state.incoming[r][c]) return { state, result: "already" };
+  if (readMark(state.incoming, c, r)) return { state, result: "already" };
   const next = state.versus === "bot" ? fork(state) : snapshot(state);
   const ship = shipAt(next.ships, c, r);
   let result = "water";
   if (ship) {
-    next.incoming[r][c] = { result: "hit" };
-    result = ship.cells.every((cell) => next.incoming[cell.r][cell.c]) ? "sunk" : "hit";
+    writeMark(next.incoming, c, r, { result: "hit" });
+    result = ship.cells.every((cell) => readMark(next.incoming, cell.c, cell.r)) ? "sunk" : "hit";
     if (result === "sunk") {
-      for (const cell of ship.cells) next.incoming[cell.r][cell.c] = { result: "sunk" };
+      for (const cell of ship.cells) writeMark(next.incoming, cell.c, cell.r, { result: "sunk" });
       if (next.versus === "bot" && !next.allowTouch) {
         for (const cell of around(ship.cells, next.width, next.height)) {
-          if (!next.incoming[cell.r][cell.c]) next.incoming[cell.r][cell.c] = { result: "water", auto: true };
+          if (!readMark(next.incoming, cell.c, cell.r)) {
+            writeMark(next.incoming, cell.c, cell.r, { result: "water", auto: true });
+          }
         }
       }
     }
   } else {
-    next.incoming[r][c] = { result: "water" };
+    writeMark(next.incoming, c, r, { result: "water" });
   }
   next.shotLog.push({
     c,
@@ -460,7 +541,7 @@ export function fireIncoming(state, c, r) {
     size: result === "sunk" ? ship.size : null,
     shapeId: result === "sunk" ? ship.shapeId : null,
   });
-  if (next.ships.every((item) => item.cells.every((cell) => next.incoming[cell.r][cell.c]))) {
+  if (next.ships.every((item) => item.cells.every((cell) => readMark(next.incoming, cell.c, cell.r)))) {
     next.phase = "end";
     next.outcome = "lost";
   } else if (next.versus === "bot") {
@@ -471,18 +552,18 @@ export function fireIncoming(state, c, r) {
 
 export function fireAtBot(state, c, r) {
   if (state.versus !== "bot" || state.phase !== "battle") return { state, result: "ignore" };
-  if (state.enemy[r][c]) return { state, result: "already" };
+  if (readMark(state.enemy, c, r)) return { state, result: "already" };
   if (state.turn && state.turn !== "player") return { state, result: "ignore" };
   const next = fork(state);
   const ship = shipAt(next.botShips, c, r);
   let result = "water";
   if (ship) {
-    next.enemy[r][c] = { kind: "hit", auto: false, group: null };
-    result = ship.cells.every((cell) => next.enemy[cell.r][cell.c]) ? "sunk" : "hit";
+    writeMark(next.enemy, c, r, { kind: "hit", auto: false, group: null });
+    result = ship.cells.every((cell) => readMark(next.enemy, cell.c, cell.r)) ? "sunk" : "hit";
     if (result === "sunk") {
       const group = next.nextGroup;
       next.nextGroup += 1;
-      for (const cell of ship.cells) next.enemy[cell.r][cell.c] = { kind: "sunk", auto: false, group };
+      for (const cell of ship.cells) writeMark(next.enemy, cell.c, cell.r, { kind: "sunk", auto: false, group });
       const slot = next.enemyFleet.find((item) => !item.sunk && item.shapeId === ship.shapeId);
       if (slot) {
         slot.sunk = true;
@@ -490,12 +571,14 @@ export function fireAtBot(state, c, r) {
       }
       if (!next.allowTouch) {
         for (const cell of around(ship.cells, next.width, next.height)) {
-          if (!next.enemy[cell.r][cell.c]) next.enemy[cell.r][cell.c] = { kind: "water", auto: true, group };
+          if (!readMark(next.enemy, cell.c, cell.r)) {
+            writeMark(next.enemy, cell.c, cell.r, { kind: "water", auto: true, group });
+          }
         }
       }
     }
   } else {
-    next.enemy[r][c] = { kind: "water", auto: false, group: null };
+    writeMark(next.enemy, c, r, { kind: "water", auto: false, group: null });
   }
   if (next.enemyFleet.every((slot) => slot.sunk)) {
     next.phase = "end";
@@ -509,14 +592,16 @@ export function fireAtBot(state, c, r) {
 export function botKnowledge(state) {
   const remaining = [];
   for (const ship of state.ships) {
-    const sunk = Boolean(ship.cells?.length && ship.cells.every((cell) => state.incoming[cell.r][cell.c]?.result === "sunk"));
+    const sunk = Boolean(
+      ship.cells?.length && ship.cells.every((cell) => readMark(state.incoming, cell.c, cell.r)?.result === "sunk")
+    );
     if (!sunk) remaining.push({ shapeId: ship.shapeId, size: ship.size });
   }
   const grid = [];
   for (let r = 0; r < state.height; r += 1) {
     const row = [];
     for (let c = 0; c < state.width; c += 1) {
-      const mark = state.incoming[r][c];
+      const mark = readMark(state.incoming, c, r);
       row.push(mark ? mark.result : null);
     }
     grid.push(row);
@@ -531,13 +616,9 @@ export function botKnowledge(state) {
 }
 
 export function incomingShotStats(state) {
-  const shots = [];
-  for (let r = 0; r < state.height; r += 1) {
-    for (let c = 0; c < state.width; c += 1) {
-      const mark = state.incoming[r][c];
-      if (mark && !mark.auto) shots.push(mark);
-    }
-  }
+  const shots = Object.values(normalizeBoard(state.incoming, state.width, state.height)).filter(
+    (mark) => mark && !mark.auto
+  );
   const hits = shots.filter((mark) => mark.result === "hit" || mark.result === "sunk").length;
   return { shots: shots.length, hits, rate: shots.length ? Math.round((hits / shots.length) * 100) : 0 };
 }
@@ -550,13 +631,9 @@ export function undo(state) {
 }
 
 export function ownShotStats(state) {
-  const shots = [];
-  for (let r = 0; r < state.height; r += 1) {
-    for (let c = 0; c < state.width; c += 1) {
-      const mark = state.enemy[r][c];
-      if (mark && !mark.auto) shots.push(mark);
-    }
-  }
+  const shots = Object.values(normalizeBoard(state.enemy, state.width, state.height)).filter(
+    (mark) => mark && !mark.auto
+  );
   const hits = shots.filter((mark) => mark.kind === "hit" || mark.kind === "sunk").length;
   return { shots: shots.length, hits, rate: shots.length ? Math.round((hits / shots.length) * 100) : 0 };
 }
@@ -570,7 +647,7 @@ export function logText(entry) {
 function startSunk(state, c, r) {
   const probe = snapshot(state);
   probe.history = state.history;
-  const existing = probe.enemy[r][c];
+  const existing = readMark(probe.enemy, c, r);
   if (existing?.group != null) clearGroup(probe, existing.group);
   const report = inspectSunk(probe, c, r);
   if (!report.options.length) {
@@ -578,7 +655,7 @@ function startSunk(state, c, r) {
   }
   if (report.unique) {
     const next = snapshot(state);
-    const cell = next.enemy[r][c];
+    const cell = readMark(next.enemy, c, r);
     if (cell?.group != null) clearGroup(next, cell.group);
     const again = inspectSunk(next, c, r);
     applySunk(next, again.options[0].cells, again.options[0].index);
@@ -634,12 +711,14 @@ function inspectSunk(state, c, r) {
 function applySunk(state, cells, slotIndex) {
   const group = state.nextGroup;
   state.nextGroup += 1;
-  for (const cell of cells) state.enemy[cell.r][cell.c] = { kind: "sunk", auto: false, group };
+  for (const cell of cells) writeMark(state.enemy, cell.c, cell.r, { kind: "sunk", auto: false, group });
   state.enemyFleet[slotIndex].sunk = true;
   state.enemyFleet[slotIndex].group = group;
   if (!state.allowTouch) {
     for (const cell of around(cells, state.width, state.height)) {
-      if (!state.enemy[cell.r][cell.c]) state.enemy[cell.r][cell.c] = { kind: "water", auto: true, group };
+      if (!readMark(state.enemy, cell.c, cell.r)) {
+        writeMark(state.enemy, cell.c, cell.r, { kind: "water", auto: true, group });
+      }
     }
   }
   if (state.enemyFleet.every((slot) => slot.sunk)) {
@@ -648,7 +727,7 @@ function applySunk(state, cells, slotIndex) {
   }
 }
 
-function connectedHits(grid, c, r, width, height) {
+function connectedHits(board, c, r, width, height) {
   const cells = [{ c, r }];
   const seen = new Set([`${c},${r}`]);
   const queue = [{ c, r }];
@@ -659,7 +738,7 @@ function connectedHits(grid, c, r, width, height) {
       const row = current.r + dr;
       const id = `${col},${row}`;
       if (col < 0 || row < 0 || col >= width || row >= height || seen.has(id)) continue;
-      if (grid[row][col]?.kind !== "hit") continue;
+      if (readMark(board, col, row)?.kind !== "hit") continue;
       seen.add(id);
       const cell = { c: col, r: row };
       cells.push(cell);
@@ -691,10 +770,9 @@ function firstEmbedding(component, origin, shapeId) {
 }
 
 function clearGroup(state, group) {
-  for (let r = 0; r < state.height; r += 1) {
-    for (let c = 0; c < state.width; c += 1) {
-      if (state.enemy[r][c]?.group === group) state.enemy[r][c] = null;
-    }
+  state.enemy = normalizeBoard(state.enemy, state.width, state.height);
+  for (const [key, mark] of Object.entries(state.enemy)) {
+    if (mark?.group === group) delete state.enemy[key];
   }
   for (const slot of state.enemyFleet) {
     if (slot.group === group) {
@@ -729,8 +807,8 @@ function fork(state) {
     ...state,
     ships: copyShips(state.ships),
     botShips: copyShips(state.botShips),
-    enemy: state.enemy.map((row) => row.map((cell) => (cell ? { ...cell } : null))),
-    incoming: state.incoming.map((row) => row.map((cell) => (cell ? { ...cell } : null))),
+    enemy: copyBoard(state.enemy),
+    incoming: copyBoard(state.incoming),
     enemyFleet: state.enemyFleet.map((slot) => ({ ...slot })),
     shotLog: state.shotLog.map((entry) => ({ ...entry })),
     history: state.history || [],
@@ -868,8 +946,8 @@ function sample(list, limit, rng) {
   return copy.slice(0, limit);
 }
 
-function validGrid(grid, width, height) {
-  return Array.isArray(grid) && grid.length === height && grid.every((row) => Array.isArray(row) && row.length === width);
+function validBoard(board) {
+  return Boolean(board) && typeof board === "object";
 }
 
 function keyOf(cell) {

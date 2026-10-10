@@ -315,6 +315,30 @@ body.schiffe.is-battle .battle {
   background: #7a3530;
 }
 
+.shot-line {
+  margin: 0;
+  padding: 0.35rem 0.55rem;
+  border-radius: 0.55rem;
+  font-size: 0.95rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  text-align: center;
+  background: rgba(20, 30, 44, 0.92);
+  color: var(--text);
+}
+
+.shot-line.water {
+  color: #8ec8e6;
+}
+
+.shot-line.hit {
+  color: #f0c27a;
+}
+
+.shot-line.sunk {
+  color: #ffc2b8;
+}
+
 .status {
   width: min(100%, calc(var(--label) + var(--cols, 10) * var(--cell)));
   display: flex;

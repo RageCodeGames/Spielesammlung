@@ -28,6 +28,7 @@ import {
   ownShotStats,
   placeSelected,
   previewAt,
+  readMark,
   readSave,
   resetShips,
   rotate,
@@ -92,6 +93,7 @@ let tabLock = false;
 let bootNotice = null;
 let toastTimer = 0;
 let announceTimer = 0;
+let softStatus = null;
 let fitToken = 0;
 let botTimer = 0;
 let botSeq = 0;
@@ -191,6 +193,8 @@ async function leaveOnline() {
   onlineRoom = null;
   onlineState = null;
   lastShotSeqSeen = 0;
+  softStatus = null;
+  flashCell = null;
   set(ONLINE_DRAFT_KEY, null);
 }
 
@@ -257,20 +261,9 @@ function maybeAnnounceOnlineShot() {
   lastShotSeqSeen = shot.seq;
   const me = myOnlineId();
   const asShooter = shot.shooterId === me;
-  flashCell = {
-    c: shot.c,
-    r: shot.r,
-    board: asShooter ? "enemy" : "own",
-  };
   if (tabMode || wantsTabs()) boardTab = asShooter ? "enemy" : "own";
-  const ship =
-    shot.result === "sunk"
-      ? { name: shot.shipName, size: shot.shipSize, shapeId: shot.shapeId }
-      : null;
   requestAnimationFrame(() => {
-    render();
-    announceResult(shot.result, ship, () => {
-      flashCell = null;
+    announceSoft(asShooter ? "Du" : "Gegner", shot.c, shot.r, shot.result, asShooter ? "enemy" : "own", () => {
       if (onlineState?.phase === "battle" && (tabMode || wantsTabs())) {
         boardTab = onlineState.turnPlayerId === me ? "enemy" : "own";
       }
@@ -408,8 +401,18 @@ function shapeIcon(shapeId, rotation = 0, mirrored = false, sunk = false) {
   return icon;
 }
 
+function markType(mark) {
+  return mark?.result || mark?.kind || null;
+}
+
 function ownSunk(ship) {
-  return Boolean(ship.cells?.length && ship.cells.every((cell) => state.incoming[cell.r][cell.c]));
+  return Boolean(
+    ship.cells?.length &&
+      ship.cells.every((cell) => {
+        const type = markType(readMark(state.incoming, cell.c, cell.r));
+        return type === "hit" || type === "sunk";
+      })
+  );
 }
 
 function askNewGame() {
@@ -434,6 +437,7 @@ function startFresh() {
   clearBotTimer();
   pendingMenu = null;
   flashCell = null;
+  softStatus = null;
   boardTab = "enemy";
   bootNotice = null;
   if (isOnline()) {
@@ -464,6 +468,7 @@ function startRematch() {
   clearBotTimer();
   pendingMenu = null;
   flashCell = null;
+  softStatus = null;
   boardTab = "enemy";
   playMode = "bot";
   difficulty = state.difficulty || "medium";
@@ -554,47 +559,50 @@ function paintGrid(grid, kind) {
         }
       } else if (kind === "own" || kind === "reveal") {
         const ship = shipAt(state.ships, c, r);
-        const mark = state.incoming[r][c];
+        const mark = readMark(state.incoming, c, r);
+        const type = markType(mark);
         if (ship) button.classList.add("ship");
-        if (mark?.result === "water") {
+        if (type === "water") {
           button.classList.add("mark-water");
           if (mark.auto) button.classList.add("auto");
           label.push(mark.auto ? "Wasser, automatisch" : "Wasser");
-        } else if (mark?.result === "sunk" || (ship && ownSunk(ship))) {
+        } else if (type === "sunk" || (ship && ownSunk(ship) && type === "hit")) {
           button.classList.add("mark-sunk");
           label.push("Versenkt");
-        } else if (mark?.result === "hit") {
+        } else if (type === "hit") {
           button.classList.add("mark-hit");
           label.push("Treffer");
         } else if (ship) label.push(ship.name);
       } else if (kind === "reveal-bot") {
         const ship = shipAt(state.botShips || [], c, r);
-        const mark = state.enemy[r][c];
+        const mark = readMark(state.enemy, c, r);
+        const type = markType(mark);
         if (ship) {
           button.classList.add("ship");
           label.push(ship.name);
         }
-        if (mark?.kind === "water") {
+        if (type === "water") {
           button.classList.add("mark-water");
           if (mark.auto) button.classList.add("auto");
           label.push("Wasser");
-        } else if (mark?.kind === "hit") {
+        } else if (type === "hit") {
           button.classList.add("mark-hit");
           label.push("Treffer");
-        } else if (mark?.kind === "sunk") {
+        } else if (type === "sunk") {
           button.classList.add("mark-sunk");
           label.push("Versenkt");
         }
       } else {
-        const mark = state.enemy[r][c];
-        if (mark?.kind === "water") {
+        const mark = readMark(state.enemy, c, r);
+        const type = markType(mark);
+        if (type === "water") {
           button.classList.add("mark-water");
           if (mark.auto) button.classList.add("auto");
           label.push(mark.auto ? "Wasser, automatisch" : "Wasser");
-        } else if (mark?.kind === "hit") {
+        } else if (type === "hit") {
           button.classList.add("mark-hit");
           label.push("Treffer");
-        } else if (mark?.kind === "sunk") {
+        } else if (type === "sunk") {
           button.classList.add("mark-sunk");
           label.push("Versenkt");
         }
@@ -948,6 +956,8 @@ async function handleOnlineAction(action) {
     }));
     const next = beginOnlineRematch(onlineState, players);
     lastShotSeqSeen = 0;
+    softStatus = null;
+    flashCell = null;
     set(ONLINE_DRAFT_KEY, null);
     await publishOnlineState(next);
   }
@@ -1519,11 +1529,30 @@ function renderPlace() {
   fitPlace(view);
 }
 
+function resultWord(result) {
+  return result === "water" ? "Wasser" : result === "hit" ? "Treffer" : "Versenkt";
+}
+
 function announceResult(result, ship, onClose) {
   const title = result === "water" ? "WASSER" : result === "hit" ? "TREFFER!" : "VERSENKT!";
   const sub = result === "sunk" && ship ? sunkText(ship) : "";
   showAnnounce(result, title, sub, onClose);
   unlock().then(() => playResult(result));
+}
+
+/** Online/Bot: kurze Zellen-Animation, Ton und kleine Statuszeile – keine große Overlay-Anzeige. */
+function announceSoft(who, c, r, result, board, onClose) {
+  document.querySelector(".announce")?.remove();
+  clearTimeout(announceTimer);
+  flashCell = { c, r, board };
+  softStatus = { text: `${who}: ${coord(c, r)} ${resultWord(result)}`, kind: result };
+  unlock().then(() => playResult(result));
+  render();
+  announceTimer = setTimeout(() => {
+    flashCell = null;
+    if (onClose) onClose();
+    else render();
+  }, 750);
 }
 
 function scheduleBotShot() {
@@ -1540,7 +1569,6 @@ function scheduleBotShot() {
       toast("Der Bot findet kein freies Feld.");
       return;
     }
-    flashCell = { c: shot.c, r: shot.r, board: "own" };
     if (tabMode) boardTab = "own";
     render();
     botTimer = setTimeout(() => {
@@ -1553,13 +1581,11 @@ function scheduleBotShot() {
         return;
       }
       state = fired.state;
-      flashCell = null;
       save();
       const ended = state.phase === "end";
       if (ended) recordStats();
       if (tabMode) boardTab = "own";
-      render();
-      announceResult(fired.result, fired.ship, () => {
+      announceSoft("Bot", shot.c, shot.r, fired.result, "own", () => {
         if (ended) return;
         if (state.turn === "bot") scheduleBotShot();
         else if (tabMode) {
@@ -1633,6 +1659,10 @@ function renderBattle() {
     battle.append(el("p", "bot-banner", "Bot ist dran"));
   }
 
+  if ((isBot() || isOnline()) && softStatus) {
+    battle.append(el("p", `shot-line ${softStatus.kind || ""}`, softStatus.text));
+  }
+
   const enemyBlock = el("div", "board-block");
   enemyBlock.append(el("p", "board-title", isBot() ? "Feld des Bots" : "Gegnerisches Feld"));
   const enemyGrid = makeGrid("enemy");
@@ -1647,7 +1677,7 @@ function renderBattle() {
     const r = Number(button.dataset.r);
     if (isOnline()) {
       if (onlineLocked) return;
-      if (state.enemy[r][c]) {
+      if (readMark(state.enemy, c, r)) {
         toast("Schon beschossen");
         return;
       }
@@ -1682,8 +1712,7 @@ function renderBattle() {
       const ended = state.phase === "end";
       if (ended) recordStats();
       if (tabMode) boardTab = "enemy";
-      render();
-      announceResult(fired.result, fired.ship, () => {
+      announceSoft("Du", c, r, fired.result, "enemy", () => {
         if (ended) return;
         if (state.turn === "bot") {
           if (tabMode) boardTab = "own";
@@ -1780,7 +1809,13 @@ function renderBattle() {
       return;
     }
     requestAnimationFrame(fitBoards);
-    if (isBot() && state.turn === "bot" && state.phase === "battle" && !document.querySelector(".announce")) {
+    if (
+      isBot() &&
+      state.turn === "bot" &&
+      state.phase === "battle" &&
+      !document.querySelector(".announce") &&
+      !flashCell
+    ) {
       scheduleBotShot();
     }
   });
@@ -1834,6 +1869,8 @@ function renderEnd() {
           }));
           const next = beginOnlineRematch(onlineState, players);
           lastShotSeqSeen = 0;
+          softStatus = null;
+          flashCell = null;
           set(ONLINE_DRAFT_KEY, null);
           await publishOnlineState(next);
         } else {

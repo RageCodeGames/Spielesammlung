@@ -114,6 +114,7 @@ export function freshState(players, settings, categories, rng = Math.random) {
     category,
     usedCategories: free || !category ? [] : [category],
     locked: [],
+    lastLetter: null,
     started: false,
     paused: false,
     deadline: null,
@@ -134,11 +135,13 @@ export function migrateState(data) {
       needCategory: false,
       waitingForHost: false,
       deadline: null,
+      lastLetter: null,
     },
   });
   return {
     ...next,
     settings,
+    lastLetter: next.lastLetter ? String(next.lastLetter).toUpperCase() : null,
     deadline: next.deadline == null ? null : Number(next.deadline),
     category:
       next.category == null ? (isFreeMode(settings) ? FREE_LABEL : next.category) : next.category,
@@ -227,6 +230,7 @@ export function continueFreeCategory(state, text, now = Date.now(), rng = Math.r
       ...state,
       category: normalizeFreeCategory(text),
       locked: [],
+      lastLetter: null,
       needCategory: false,
       paused: false,
     },
@@ -278,6 +282,7 @@ export function tapLetter(state, letter, pool, now = Date.now(), rng = Math.rand
   let locked = [...state.locked, key];
   let category = state.category;
   let usedCategories = state.usedCategories;
+  let lastLetter = key;
   const active = enabledLetters(state.settings);
   const current = (state.current + 1) % state.players.length;
   if (active.every((item) => locked.includes(item))) {
@@ -286,6 +291,7 @@ export function tapLetter(state, letter, pool, now = Date.now(), rng = Math.rand
         state: {
           ...state,
           locked,
+          lastLetter: null,
           current,
           needCategory: true,
           paused: false,
@@ -296,10 +302,11 @@ export function tapLetter(state, letter, pool, now = Date.now(), rng = Math.rand
       };
     }
     locked = [];
+    lastLetter = null;
     category = drawCategory(pool, usedCategories, rng);
     if (!usedCategories.includes(category)) usedCategories = [...usedCategories, category];
   }
-  const next = startTurn({ ...state, locked, category, usedCategories, current }, now, rng);
+  const next = startTurn({ ...state, locked, lastLetter, category, usedCategories, current }, now, rng);
   return { state: next, effect: "tap", letter: key };
 }
 
@@ -358,6 +365,7 @@ export function afterBoom(state, pool, rng = Math.random) {
       round: state.round + 1,
       category: FREE_LABEL,
       locked: [],
+      lastLetter: null,
       started: false,
       paused: false,
       waitingForHost: false,
@@ -375,6 +383,7 @@ export function afterBoom(state, pool, rng = Math.random) {
     category,
     usedCategories,
     locked: [],
+    lastLetter: null,
     started: false,
     paused: false,
     waitingForHost: false,

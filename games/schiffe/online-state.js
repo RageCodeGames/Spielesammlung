@@ -1,18 +1,22 @@
 /**
  * Online-Zustand für Schiffe versenken (zwei Spieler, Host ist Wahrheit).
  * Flotten liegen im gemeinsamen State – die UI zeigt die gegnerische nie vor dem Ende.
+ * Schüsse als Koordinaten-Objekte (boards[playerId]["c_r"]), damit Firebase keine Lücken verschluckt.
  */
 
 import {
   allPlaced,
-  emptyGrid,
+  copyBoard,
+  emptyBoard,
   expandFleet,
   fleetCells,
   assessFleet,
+  normalizeBoard,
   placementIssue,
+  readMark,
   rulesFor,
   shipAt,
-  SHAPES,
+  writeMark,
 } from "./logic.js";
 import { normalizeRemote, readArray } from "../../shared/online.js";
 
@@ -22,10 +26,6 @@ const MODE_LABEL = {
   mixed: "Gemischt",
   custom: "Custom",
 };
-
-function copyGrid(grid) {
-  return (grid || []).map((row) => (row || []).map((cell) => (cell ? { ...cell } : null)));
-}
 
 function copyShips(ships) {
   return (ships || []).map((ship) => ({
@@ -46,7 +46,7 @@ function cloneOnline(state) {
       Object.entries(state.fleets || {}).map(([id, ships]) => [id, copyShips(ships)])
     ),
     boards: Object.fromEntries(
-      Object.entries(state.boards || {}).map(([id, grid]) => [id, copyGrid(grid)])
+      Object.entries(state.boards || {}).map(([id, board]) => [id, copyBoard(board)])
     ),
     fleetStatus: Object.fromEntries(
       Object.entries(state.fleetStatus || {}).map(([id, slots]) => [
@@ -88,6 +88,20 @@ function around(cells, width, height) {
     }
   }
   return extra;
+}
+
+/** Gegnerische Schüsse (kind) → eigenes Feld (result). */
+function boardAsIncoming(board, width, height) {
+  const out = emptyBoard();
+  for (const [key, mark] of Object.entries(normalizeBoard(board, width, height))) {
+    if (!mark) continue;
+    out[key] = {
+      result: mark.kind || mark.result,
+      auto: !!mark.auto,
+      group: mark.group ?? null,
+    };
+  }
+  return out;
 }
 
 export function defaultOnlineSettings() {
@@ -142,7 +156,7 @@ export function beginOnlineMatch(players, settingsInput, rematchCount = 0, previ
   for (const id of playerIds) {
     const ships = expandFleet(settings);
     fleets[id] = ships;
-    boards[id] = emptyGrid(settings.width, settings.height);
+    boards[id] = emptyBoard();
     fleetStatus[id] = fleetSlotsFromShips(ships);
     ready[id] = false;
     nextGroup[id] = 1;
@@ -207,7 +221,7 @@ export function migrateOnlineState(data) {
   for (const id of playerIds) {
     fleets[id] = copyShips(readArray(next.fleets?.[id]));
     if (!fleets[id].length) fleets[id] = expandFleet(settings);
-    boards[id] = normalizeGrid(next.boards?.[id], settings.width, settings.height);
+    boards[id] = normalizeBoard(next.boards?.[id], settings.width, settings.height);
     fleetStatus[id] = readArray(next.fleetStatus?.[id]).map((slot) => ({
       shapeId: slot.shapeId,
       name: slot.name,
@@ -249,20 +263,6 @@ export function migrateOnlineState(data) {
     shotSeq: Number(next.shotSeq) || 0,
     winnerId: next.winnerId || null,
   };
-}
-
-function normalizeGrid(raw, width, height) {
-  const grid = emptyGrid(width, height);
-  if (!Array.isArray(raw)) return grid;
-  for (let r = 0; r < height; r += 1) {
-    const row = raw[r];
-    if (!Array.isArray(row)) continue;
-    for (let c = 0; c < width; c += 1) {
-      const cell = row[c];
-      if (cell && typeof cell === "object") grid[r][c] = { ...cell };
-    }
-  }
-  return grid;
 }
 
 export function opponentId(state, myId) {
@@ -325,7 +325,7 @@ export function fireOnlineShot(state, shooterId, c, r) {
   if (!state.playerIds.includes(shooterId)) return { state, result: "ignore" };
   if (c < 0 || r < 0 || c >= state.width || r >= state.height) return { state, result: "ignore" };
   const board = state.boards[shooterId];
-  if (!board || board[r][c]) return { state, result: "already" };
+  if (!board || readMark(board, c, r)) return { state, result: "already" };
   const defenderId = opponentId(state, shooterId);
   if (!defenderId) return { state, result: "ignore" };
   const next = cloneOnline(state);
@@ -333,14 +333,14 @@ export function fireOnlineShot(state, shooterId, c, r) {
   let result = "water";
   let sunkShip = null;
   if (ship) {
-    next.boards[shooterId][r][c] = { kind: "hit", auto: false, group: null };
-    result = ship.cells.every((cell) => next.boards[shooterId][cell.r][cell.c]) ? "sunk" : "hit";
+    writeMark(next.boards[shooterId], c, r, { kind: "hit", auto: false, group: null });
+    result = ship.cells.every((cell) => readMark(next.boards[shooterId], cell.c, cell.r)) ? "sunk" : "hit";
     if (result === "sunk") {
       sunkShip = ship;
       const group = next.nextGroup[shooterId] || 1;
       next.nextGroup[shooterId] = group + 1;
       for (const cell of ship.cells) {
-        next.boards[shooterId][cell.r][cell.c] = { kind: "sunk", auto: false, group };
+        writeMark(next.boards[shooterId], cell.c, cell.r, { kind: "sunk", auto: false, group });
       }
       const slot = next.fleetStatus[shooterId]?.find(
         (item) => !item.sunk && item.shapeId === ship.shapeId
@@ -351,14 +351,14 @@ export function fireOnlineShot(state, shooterId, c, r) {
       }
       if (!next.allowTouch) {
         for (const cell of around(ship.cells, next.width, next.height)) {
-          if (!next.boards[shooterId][cell.r][cell.c]) {
-            next.boards[shooterId][cell.r][cell.c] = { kind: "water", auto: true, group };
+          if (!readMark(next.boards[shooterId], cell.c, cell.r)) {
+            writeMark(next.boards[shooterId], cell.c, cell.r, { kind: "water", auto: true, group });
           }
         }
       }
     }
   } else {
-    next.boards[shooterId][r][c] = { kind: "water", auto: false, group: null };
+    writeMark(next.boards[shooterId], c, r, { kind: "water", auto: false, group: null });
   }
 
   next.shotSeq = (next.shotSeq || 0) + 1;
@@ -404,23 +404,18 @@ export function beginOnlineRematch(state, players) {
 }
 
 export function shotStatsFor(state, playerId) {
-  const board = state.boards?.[playerId] || [];
-  const shots = [];
-  for (const row of board) {
-    for (const cell of row || []) {
-      if (cell && !cell.auto) shots.push(cell);
-    }
-  }
+  const board = normalizeBoard(state.boards?.[playerId], state.width, state.height);
+  const shots = Object.values(board).filter((mark) => mark && !mark.auto);
   const hits = shots.filter((mark) => mark.kind === "hit" || mark.kind === "sunk").length;
   return { shots: shots.length, hits, rate: shots.length ? Math.round((hits / shots.length) * 100) : 0 };
 }
 
-/** Lokale Ansicht für die bestehende Render-Pipeline. */
+/** Lokale Ansicht für die bestehende Render-Pipeline – nur Host-Zustand, keine lokalen Markierungen. */
 export function viewAsPlayer(online, myId) {
   const other = opponentId(online, myId);
   const ships = copyShips(online.fleets?.[myId] || []);
-  const enemy = copyGrid(online.boards?.[myId] || emptyGrid(online.width, online.height));
-  const incoming = copyGrid(online.boards?.[other] || emptyGrid(online.width, online.height));
+  const enemy = copyBoard(online.boards?.[myId] || emptyBoard());
+  const incoming = boardAsIncoming(online.boards?.[other] || emptyBoard(), online.width, online.height);
   const enemyFleet = (online.fleetStatus?.[myId] || []).map((slot) => ({ ...slot }));
   const outcome =
     online.phase === "end"

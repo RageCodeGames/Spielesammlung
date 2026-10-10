@@ -972,8 +972,13 @@ function letterButtons() {
   const canTap = !lettersBlocked && (!isOnline() || isMyTurn());
   for (const letter of active) {
     const locked = (state.locked || []).includes(letter);
+    const last = state.lastLetter === letter;
     const watch = isOnline() && !isMyTurn() && !locked;
-    const button = el("button", `letter${locked ? " is-locked" : ""}${watch ? " is-watch" : ""}`, letter);
+    const button = el(
+      "button",
+      `letter${locked ? " is-locked" : ""}${last ? " is-last" : ""}${watch ? " is-watch" : ""}`,
+      letter
+    );
     button.type = "button";
     button.disabled = locked || !canTap;
     button.addEventListener("click", () => onLetter(letter));
