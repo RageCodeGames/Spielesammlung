@@ -60,6 +60,7 @@ let freeDraft = "";
 let bootNotice = null;
 let showingResume = false;
 let showingStandings = false;
+let showingRingMenu = false;
 let toastTimer = 0;
 let tickTimer = 0;
 let boomTimer = 0;
@@ -240,6 +241,7 @@ function askNewGame() {
 function startFresh() {
   stopTimers();
   showingStandings = false;
+  showingRingMenu = false;
   showingResume = false;
   state = null;
   step = "mode";
@@ -986,20 +988,21 @@ function roundHintText() {
     : `Runde ${state.round} von ${state.settings.rounds}`;
 }
 
-function appendPlayActions(parent) {
+function appendPlayActions(parent, options = {}) {
+  const ring = options.ring === true;
   const who = state.players[state.current];
   const hostControls = !isOnline() || iAmHost();
   if (!state.started) {
     let freeField = null;
-    if (isFreeMode(state.settings) && hostControls) {
+    if (isFreeMode(state.settings) && hostControls && !ring) {
       freeField = appendFreeCategoryForm(parent, {
         title: "Sprecht eine Kategorie ab",
       });
-    } else if (isFreeMode(state.settings)) {
+    } else if (isFreeMode(state.settings) && !hostControls) {
       parent.append(el("p", "lead", "Der Host legt die Kategorie fest."));
     }
     if (hostControls) {
-      const start = el("button", "btn primary", "Start");
+      const start = el("button", ring ? "btn primary ring-start" : "btn primary", "Start");
       start.type = "button";
       start.addEventListener("click", () => {
         if (isFreeMode(state.settings)) {
@@ -1013,20 +1016,26 @@ function appendPlayActions(parent) {
       });
       parent.append(start);
       if (!isFreeMode(state.settings)) {
-        const other = el("button", "btn", "Andere Kategorie");
+        const other = el("button", ring ? "btn ring-other" : "btn", "Andere Kategorie");
         other.type = "button";
         other.addEventListener("click", () => {
           publishState(otherCategory(state, allCategories()));
         });
         parent.append(other);
       }
-    } else {
+    } else if (!isFreeMode(state.settings)) {
       parent.append(el("p", "lead", "Warten auf den Host …"));
     }
     return;
   }
   if (state.needCategory) return;
   if (!hostControls) return;
+  const pauseBtn = el("button", "btn", "Pause");
+  pauseBtn.type = "button";
+  pauseBtn.disabled = state.paused;
+  pauseBtn.addEventListener("click", () => {
+    publishState(pause(state));
+  });
   const invalid = el("button", "btn", "Ungültig");
   invalid.type = "button";
   invalid.disabled = state.paused;
@@ -1040,14 +1049,8 @@ function appendPlayActions(parent) {
     if (rejected.effect !== "boom") return;
     burst(rejected);
   });
-  const pauseBtn = el("button", "btn", "Pause");
-  pauseBtn.type = "button";
-  pauseBtn.disabled = state.paused;
-  pauseBtn.addEventListener("click", () => {
-    publishState(pause(state));
-  });
   const row = el("div", "btn-row");
-  row.append(invalid, pauseBtn);
+  row.append(pauseBtn, invalid);
   parent.append(row);
   if (isOnline() && !currentSeatOnline() && !state.paused) {
     const skip = el("button", "btn", `${who?.name || "Spieler"} überspringen`);
@@ -1065,6 +1068,7 @@ function finishPlayScreen() {
   if (hostMissing() && state.started) renderWaitHost();
   else if (state.needCategory) renderNeedCategory();
   else if (state.paused) renderPause();
+  if (showingRingMenu) renderRingMenu();
   if (showingStandings) renderStandings(false);
   armTimer();
 }
@@ -1109,6 +1113,43 @@ function renderPlayGrid() {
   finishPlayScreen();
 }
 
+function renderRingMenu() {
+  const back = el("div", "dialog-back ring-menu-back");
+  const dialog = el("div", "dialog");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.append(el("h2", "", "Menü"));
+  const hub = backLink();
+  hub.classList.add("btn");
+  const standingsBtn = el("button", "btn", "Stand");
+  standingsBtn.type = "button";
+  standingsBtn.addEventListener("click", () => {
+    showingRingMenu = false;
+    showingStandings = true;
+    render();
+  });
+  const fresh = el("button", "btn", "Neues Spiel");
+  fresh.type = "button";
+  fresh.addEventListener("click", () => {
+    showingRingMenu = false;
+    askNewGame();
+  });
+  const close = el("button", "btn primary", "Schließen");
+  close.type = "button";
+  close.addEventListener("click", () => {
+    showingRingMenu = false;
+    back.remove();
+  });
+  dialog.append(hub, standingsBtn, fresh, close);
+  back.addEventListener("click", (event) => {
+    if (event.target !== back) return;
+    showingRingMenu = false;
+    back.remove();
+  });
+  back.append(dialog);
+  app.append(back);
+}
+
 function renderPlayRing() {
   setRingLock(true);
   const view = el("section", "screen play play-ring");
@@ -1118,27 +1159,24 @@ function renderPlayRing() {
 
   const center = el("div", "ring-center");
   const cat = displayCategory(state);
+  const whoName = state.players[state.current]?.name || "Spieler";
   center.append(el("p", "category", cat));
-  const who = state.players[state.current];
-  center.append(el("p", "who", who?.name || "Spieler"));
+  center.append(el("p", "who", whoName));
   center.append(el("p", "round-hint", roundHintText()));
 
-  const actions = el("div", "ring-actions");
-  const top = el("div", "btn-row");
-  top.append(backLink());
-  const standingsBtn = el("button", "btn", "Stand");
-  standingsBtn.type = "button";
-  standingsBtn.addEventListener("click", () => {
-    showingStandings = true;
+  const menu = el("button", "btn ring-menu-btn", "⋯");
+  menu.type = "button";
+  menu.setAttribute("aria-label", "Menü");
+  menu.addEventListener("click", () => {
+    showingRingMenu = true;
     render();
   });
-  const fresh = el("button", "btn", "Neues Spiel");
-  fresh.type = "button";
-  fresh.addEventListener("click", askNewGame);
-  top.append(standingsBtn, fresh);
-  actions.append(top);
-  appendPlayActions(actions);
+  center.append(menu);
+
+  const actions = el("div", "ring-actions");
+  appendPlayActions(actions, { ring: true });
   center.append(actions);
+  center.append(el("p", "who is-flip", whoName));
   center.append(el("p", "category is-flip", cat));
   stage.append(center);
   view.append(stage);

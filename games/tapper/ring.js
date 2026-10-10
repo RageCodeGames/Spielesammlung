@@ -1,15 +1,107 @@
-/** Buchstaben gleichmäßig auf dem Rechteckrand, mehr auf den langen Seiten. */
+/** Buchstaben-Ring: Seiten zwischen freien Ecken, keine Überlappung. */
 
-function pointOnRect(d, rw, rh) {
-  const peri = 2 * (rw + rh);
-  let t = ((d % peri) + peri) % peri;
-  if (t < rw) return { x: t, y: 0, rot: 180 };
-  t -= rw;
-  if (t < rh) return { x: rw, y: t, rot: -90 };
-  t -= rh;
-  if (t < rw) return { x: rw - t, y: rh, rot: 0 };
-  t -= rw;
-  return { x: 0, y: rh - t, rot: 90 };
+export const RING_MIN_GAP = 6;
+const EDGE = 4;
+const MIN_SIZE = 28;
+const SIDES = ["top", "right", "bottom", "left"];
+const ROT = { top: 180, right: -90, bottom: 0, left: 90 };
+
+function roundCounts(n, lengths) {
+  const total = lengths.reduce((sum, len) => sum + len, 0);
+  const raw = lengths.map((len) => (n * len) / total);
+  const counts = raw.map((value) => Math.floor(value));
+  let rest = n - counts.reduce((sum, value) => sum + value, 0);
+  const order = raw
+    .map((value, index) => ({ index, frac: value - Math.floor(value) }))
+    .sort((a, b) => b.frac - a.frac || a.index - b.index);
+  for (let i = 0; i < rest; i += 1) counts[order[i % order.length].index] += 1;
+  return counts;
+}
+
+export function countPerSide(n, width, height) {
+  return roundCounts(n, [width, height, width, height]);
+}
+
+function sizeLimit(sideLen, count, gap) {
+  if (count <= 0) return Infinity;
+  return (sideLen - 2 * EDGE - (count + 1) * gap) / (count + 2);
+}
+
+function tileSize(width, height, counts, gap) {
+  const [top, right, bottom, left] = counts;
+  const raw = Math.min(
+    sizeLimit(width, top, gap),
+    sizeLimit(width, bottom, gap),
+    sizeLimit(height, right, gap),
+    sizeLimit(height, left, gap),
+    Math.min(width, height) * 0.22
+  );
+  return Math.max(MIN_SIZE, Math.floor(raw));
+}
+
+function alongSide(count, size, gap, start, lastStart) {
+  if (count <= 0) return [];
+  if (count === 1) return [(start + lastStart) / 2];
+  const step = (lastStart - start) / (count - 1);
+  return Array.from({ length: count }, (_, i) => start + i * step);
+}
+
+function sidePlacements(side, count, size, gap, width, height) {
+  const first = EDGE + size + gap;
+  const lastX = width - EDGE - 2 * size - gap;
+  const lastY = height - EDGE - 2 * size - gap;
+  const rot = ROT[side];
+  if (side === "top") {
+    return alongSide(count, size, gap, first, lastX).map((x) => ({ x, y: EDGE, rot, side }));
+  }
+  if (side === "right") {
+    return alongSide(count, size, gap, first, lastY).map((y) => ({
+      x: width - EDGE - size,
+      y,
+      rot,
+      side,
+    }));
+  }
+  if (side === "bottom") {
+    return alongSide(count, size, gap, first, lastX)
+      .reverse()
+      .map((x) => ({ x, y: height - EDGE - size, rot, side }));
+  }
+  return alongSide(count, size, gap, first, lastY)
+    .reverse()
+    .map((y) => ({ x: EDGE, y, rot, side }));
+}
+
+export function planLetterRing(width, height, n, gap = RING_MIN_GAP) {
+  if (n <= 0 || width < 40 || height < 40) {
+    return { size: MIN_SIZE, positions: [], counts: [0, 0, 0, 0] };
+  }
+  const counts = countPerSide(n, width, height);
+  const size = tileSize(width, height, counts, gap);
+  const positions = [];
+  for (let i = 0; i < SIDES.length; i += 1) {
+    positions.push(...sidePlacements(SIDES[i], counts[i], size, gap, width, height));
+  }
+  return { size, positions, counts };
+}
+
+function boxesOverlap(a, b, minGap) {
+  return (
+    a.x < b.x + b.size + minGap - 0.01 &&
+    a.x + a.size + minGap - 0.01 > b.x &&
+    a.y < b.y + b.size + minGap - 0.01 &&
+    a.y + a.size + minGap - 0.01 > b.y
+  );
+}
+
+export function ringHasOverlap(plan, minGap = RING_MIN_GAP) {
+  const boxes = plan.positions.map((pos) => ({ x: pos.x, y: pos.y, size: plan.size }));
+  for (let i = 0; i < boxes.length; i += 1) {
+    for (let j = i + 1; j < boxes.length; j += 1) {
+      if (boxesOverlap(boxes[i], boxes[j], minGap)) return true;
+    }
+  }
+  return false;
 }
 
 export function layoutLetterRing(stage, buttons, center) {
@@ -17,47 +109,23 @@ export function layoutLetterRing(stage, buttons, center) {
   if (!n || !stage) return;
   const width = stage.clientWidth;
   const height = stage.clientHeight;
-  if (width < 40 || height < 40) return;
-
-  const margin = 4;
-  const minGap = 8;
-  const minSize = 40;
-  const maxSize = Math.min(80, width * 0.26, height * 0.16);
-  let lo = minSize;
-  let hi = Math.max(minSize, maxSize);
-  let size = minSize;
-
-  for (let i = 0; i < 14; i += 1) {
-    const mid = (lo + hi) / 2;
-    const rw = Math.max(1, width - 2 * margin - mid);
-    const rh = Math.max(1, height - 2 * margin - mid);
-    const peri = 2 * (rw + rh);
-    if (peri / n >= mid + minGap) {
-      size = mid;
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
-
-  const rw = Math.max(1, width - 2 * margin - size);
-  const rh = Math.max(1, height - 2 * margin - size);
-  const peri = 2 * (rw + rh);
-  const font = Math.round(size * 0.46);
+  const plan = planLetterRing(width, height, n);
+  const font = Math.round(plan.size * 0.46);
 
   for (let i = 0; i < n; i += 1) {
-    const { x, y, rot } = pointOnRect(((i + 0.5) / n) * peri, rw, rh);
+    const pos = plan.positions[i];
     const btn = buttons[i];
-    btn.style.width = `${size}px`;
-    btn.style.height = `${size}px`;
+    if (!pos || !btn) continue;
+    btn.style.width = `${plan.size}px`;
+    btn.style.height = `${plan.size}px`;
     btn.style.fontSize = `${font}px`;
-    btn.style.left = `${margin + x}px`;
-    btn.style.top = `${margin + y}px`;
-    btn.style.transform = `rotate(${rot}deg)`;
+    btn.style.left = `${pos.x}px`;
+    btn.style.top = `${pos.y}px`;
+    btn.style.transform = `rotate(${pos.rot}deg)`;
   }
 
   if (center) {
-    const inset = Math.max(12, Math.round(margin + size + 6));
+    const inset = Math.max(12, Math.round(EDGE + plan.size + RING_MIN_GAP));
     center.style.inset = `${inset}px`;
   }
 }

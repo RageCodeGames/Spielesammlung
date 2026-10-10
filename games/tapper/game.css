@@ -165,24 +165,40 @@ body.tapper #app {
 }
 
 .ring-center .who {
-  font-size: clamp(1.15rem, 5vw, 1.9rem);
+  font-size: clamp(1.35rem, 6vw, 2.1rem);
+  font-weight: 800;
 }
 
 .ring-center .category {
   font-size: clamp(0.95rem, 3.6vw, 1.35rem);
 }
 
-.ring-center .category.is-flip {
+.ring-center .category.is-flip,
+.ring-center .who.is-flip {
   transform: rotate(180deg);
 }
 
 .ring-center .round-hint {
-  font-size: 0.8rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.ring-menu-btn {
+  pointer-events: auto;
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  align-self: center;
+  font-size: 1.35rem;
+  letter-spacing: 0.12em;
+  line-height: 1;
 }
 
 .ring-actions {
   display: flex;
   flex-direction: column;
+  align-items: stretch;
   gap: 0.35rem;
   width: min(100%, 15.5rem);
   pointer-events: auto;
@@ -193,17 +209,28 @@ body.tapper #app {
   font-size: 0.95rem;
 }
 
+.ring-actions .ring-start {
+  min-height: 56px;
+  font-size: 1.25rem;
+}
+
+.ring-actions .ring-other {
+  min-height: 36px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  opacity: 0.9;
+}
+
 .ring-actions .btn-row .btn {
   min-width: 0;
 }
 
-.ring-actions .back {
-  min-height: 44px;
+.ring-menu-back .dialog .back {
+  min-height: 48px;
   border-radius: 999px;
   background: var(--surface);
   color: var(--text);
   font-weight: 700;
-  padding: 0 0.7rem;
 }
 
 html.tapper-ring,
