@@ -510,7 +510,7 @@ async function createRoomInner(newGameId, hostName, settings = {}) {
   return code;
 }
 
-export async function joinRoom(code, name) {
+export async function joinRoom(code, name, options = {}) {
   try {
     await initOnline();
     const normalized = normalizeRoomCode(code);
@@ -530,6 +530,10 @@ export async function joinRoom(code, name) {
 
     const players = data.players && typeof data.players === "object" ? data.players : {};
     const already = players[uid];
+    const maxPlayers = Number(options.maxPlayers);
+    if (!already && Number.isFinite(maxPlayers) && maxPlayers > 0 && Object.keys(players).length >= maxPlayers) {
+      fail("full", "Raum ist voll");
+    }
     const seats = Object.values(players).map((p) => Number(p?.seat) || 0);
     const seat = already && Number.isFinite(already.seat) ? already.seat : (seats.length ? Math.max(...seats) + 1 : 0);
 

@@ -169,6 +169,28 @@ body.schiffe.is-battle .battle {
   line-height: 1.2;
 }
 
+.code-hint {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.game-code-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.bot-banner.your-turn {
+  color: var(--accent);
+}
+
+.bot-banner.wait-banner {
+  background: #3a2a14;
+}
+
 .bot-banner {
   margin: 0;
   width: min(100%, calc(var(--label) + var(--cols, 10) * var(--cell)));

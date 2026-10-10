@@ -39,6 +39,18 @@ import {
   undo,
 } from "./logic.js";
 import { benchmarkBots, chooseShot } from "./bot.js";
+import {
+  applyReady,
+  beginOnlineMatch,
+  beginOnlineRematch,
+  fireOnlineShot,
+  migrateOnlineState,
+  normalizeOnlineSettings,
+  opponentId,
+  shotStatsFor,
+  summarizeOnlineSettings,
+  viewAsPlayer,
+} from "./online-state.js";
 import { playTone, unlock } from "../../shared/sound.js";
 import { get, set } from "../../shared/storage.js";
 import { preserveScreenScroll } from "../../shared/scroll.js";
@@ -49,6 +61,8 @@ const STORAGE_KEY = "kajuete:schiffe";
 const BOT_KEY = "kajuete:schiffe-bot";
 const PRESET_KEY = "kajuete:schiffe-vorlagen";
 const STATS_KEY = "kajuete:schiffe-bot-stats";
+const ONLINE_DRAFT_KEY = "kajuete:schiffe-online-draft";
+const ROOM_SESSION_KEY = "kajuete:online-room";
 
 const DIFFICULTIES = [
   ["easy", "Leicht", "Tippt eher zufällig."],
@@ -84,6 +98,18 @@ let botSeq = 0;
 let flashCell = null;
 let hotseatSave = null;
 let botSave = null;
+let onlineApi = null;
+let lobbyHandle = null;
+let onlineRoom = null;
+let onlineState = null;
+let unsubRoom = null;
+let unsubAction = null;
+let unsubNet = null;
+let unsubBadge = null;
+let enteringOnline = false;
+let lastShotSeqSeen = 0;
+let onlineBusy = false;
+let lastOnlineTurn = null;
 
 const app = document.getElementById("app");
 
@@ -95,6 +121,10 @@ function el(tag, className, text) {
 }
 
 function save() {
+  if (isOnline()) {
+    if (state?.phase === "place") saveOnlineDraft();
+    return;
+  }
   if (state.phase !== "place" && state.phase !== "battle" && state.phase !== "end") return;
   if (state.versus === "bot") set(BOT_KEY, state);
   else set(STORAGE_KEY, state);
@@ -102,6 +132,151 @@ function save() {
 
 function isBot() {
   return state.versus === "bot" || playMode === "bot";
+}
+
+function isOnline() {
+  return playMode === "online" || state?.versus === "online" || onlineState?.versus === "online";
+}
+
+function iAmHost() {
+  return isOnline() && Boolean(onlineApi?.isHost?.());
+}
+
+function myOnlineId() {
+  return onlineApi?.getPlayerId?.() || null;
+}
+
+function reportError(context, err) {
+  console.error(`[schiffe] ${context}`, err);
+  toast(err?.message || "Etwas ist schiefgelaufen.");
+}
+
+function wantsOnline() {
+  try {
+    return Boolean(new URL(location.href).searchParams.get("join"));
+  } catch {
+    return false;
+  }
+}
+
+function clearOnlineSubs() {
+  if (unsubRoom) {
+    unsubRoom();
+    unsubRoom = null;
+  }
+  if (unsubAction) {
+    unsubAction();
+    unsubAction = null;
+  }
+  if (unsubNet) {
+    unsubNet();
+    unsubNet = null;
+  }
+  if (unsubBadge) {
+    unsubBadge();
+    unsubBadge = null;
+  }
+}
+
+async function leaveOnline() {
+  clearOnlineSubs();
+  lobbyHandle?.destroy();
+  lobbyHandle = null;
+  enteringOnline = false;
+  try {
+    await onlineApi?.leaveRoom?.();
+  } catch (err) {
+    console.error("[schiffe] Raum verlassen", err);
+  }
+  onlineRoom = null;
+  onlineState = null;
+  lastShotSeqSeen = 0;
+  set(ONLINE_DRAFT_KEY, null);
+}
+
+function opponentOnline() {
+  if (!onlineRoom || !isOnline()) return true;
+  const me = myOnlineId();
+  const other = onlineRoom.players?.find((player) => player.id !== me);
+  if (!other) return false;
+  return other.online !== false;
+}
+
+function saveOnlineDraft() {
+  if (!isOnline() || !state || state.phase !== "place") return;
+  set(ONLINE_DRAFT_KEY, {
+    room: onlineApi?.getRoomCode?.() || null,
+    ships: state.ships,
+  });
+}
+
+function adoptOnlineState(raw, options = {}) {
+  const migrated = migrateOnlineState(raw);
+  if (!migrated) return;
+  onlineState = migrated;
+  const me = myOnlineId();
+  const view = viewAsPlayer(migrated, me);
+  if (migrated.phase === "place" && !migrated.ready?.[me]) {
+    const draftShips = get(ONLINE_DRAFT_KEY, null);
+    if (draftShips?.room === onlineApi?.getRoomCode?.() && Array.isArray(draftShips.ships)) {
+      view.ships = draftShips.ships;
+      view.selectedId = view.ships.find((ship) => !ship.cells)?.id ?? view.ships[0]?.id ?? null;
+    }
+  }
+  state = view;
+  playMode = "online";
+  if (migrated.rules) {
+    draft = normalizeOnlineSettings({ ...migrated.rules, extraShot: migrated.extraShot });
+    rememberCustom(draft);
+    extraShot = draft.extraShot !== false;
+  }
+  if (!options.silent) {
+    maybeAnnounceOnlineShot();
+    render();
+  }
+}
+
+async function publishOnlineState(next) {
+  if (!iAmHost()) return;
+  onlineBusy = true;
+  try {
+    await onlineApi.setState(next);
+    onlineState = next;
+    adoptOnlineState(next);
+  } catch (err) {
+    reportError("Zustand schreiben", err);
+  } finally {
+    onlineBusy = false;
+  }
+}
+
+function maybeAnnounceOnlineShot() {
+  if (!onlineState?.lastShot || onlineState.phase === "place") return;
+  const shot = onlineState.lastShot;
+  if (!shot.seq || shot.seq <= lastShotSeqSeen) return;
+  lastShotSeqSeen = shot.seq;
+  const me = myOnlineId();
+  const asShooter = shot.shooterId === me;
+  flashCell = {
+    c: shot.c,
+    r: shot.r,
+    board: asShooter ? "enemy" : "own",
+  };
+  if (tabMode || wantsTabs()) boardTab = asShooter ? "enemy" : "own";
+  const ship =
+    shot.result === "sunk"
+      ? { name: shot.shipName, size: shot.shipSize, shapeId: shot.shapeId }
+      : null;
+  requestAnimationFrame(() => {
+    render();
+    announceResult(shot.result, ship, () => {
+      flashCell = null;
+      if (onlineState?.phase === "battle" && (tabMode || wantsTabs())) {
+        boardTab = onlineState.turnPlayerId === me ? "enemy" : "own";
+      }
+      render();
+    });
+  });
 }
 
 function loadStats() {
@@ -203,10 +378,21 @@ function backLink() {
   return link;
 }
 
-function codeLine(code) {
+function codeLine(code, options = {}) {
+  const wrap = el("div", "game-code-block");
   const line = el("p", "game-code");
   line.append(document.createTextNode("Spielcode "), el("strong", "", formatCode(code)));
-  return line;
+  wrap.append(line);
+  if (options.hint) {
+    wrap.append(
+      el(
+        "p",
+        "code-hint",
+        "Beide müssen dieselben Einstellungen haben. Lies deinen Code vor – dein Mitspieler tippt ihn unter „Code vom Mitspieler eingeben“ ein."
+      )
+    );
+  }
+  return wrap;
 }
 
 function shapeIcon(shapeId, rotation = 0, mirrored = false, sunk = false) {
@@ -227,6 +413,16 @@ function ownSunk(ship) {
 }
 
 function askNewGame() {
+  if (isOnline()) {
+    confirmDialog(iAmHost() ? "Raum schließen und neu beginnen?" : "Raum verlassen und neu beginnen?", () => {
+      leaveOnline().then(() => {
+        playMode = null;
+        state = freshState();
+        render();
+      });
+    });
+    return;
+  }
   if (state.phase === "place" || state.phase === "battle") {
     confirmDialog("Neues Spiel beginnen? Der laufende Spielstand wird gelöscht.", startFresh);
     return;
@@ -240,6 +436,14 @@ function startFresh() {
   flashCell = null;
   boardTab = "enemy";
   bootNotice = null;
+  if (isOnline()) {
+    leaveOnline().then(() => {
+      playMode = null;
+      state = freshState();
+      render();
+    });
+    return;
+  }
   if (showingResume) {
     if (isRunning(hotseatSave)) set(STORAGE_KEY, freshState());
     if (isRunning(botSave)) set(BOT_KEY, freshState());
@@ -474,7 +678,7 @@ function askCode() {
   const dialog = el("div", "dialog");
   dialog.setAttribute("role", "dialog");
   dialog.setAttribute("aria-modal", "true");
-  dialog.append(el("p", "", "Code eingeben"));
+  dialog.append(el("p", "", "Code vom Mitspieler eingeben"));
   const input = document.createElement("input");
   input.className = "text-input";
   input.type = "text";
@@ -483,7 +687,7 @@ function askCode() {
   input.autocomplete = "off";
   input.spellcheck = false;
   input.enterKeyHint = "done";
-  input.setAttribute("aria-label", "Spielcode");
+  input.setAttribute("aria-label", "Code vom Mitspieler");
   const error = el("p", "note is-bad");
   error.hidden = true;
   const ok = el("button", "btn primary", "Übernehmen");
@@ -544,6 +748,328 @@ function askWhichShip(choice) {
   document.body.append(back);
 }
 
+function appendOnlineSettingsControls(parent, current, apply) {
+  const choices = el("div", "choices");
+  for (const [id, title, detail] of MODES) {
+    const button = el("button", current.mode === id ? "choice is-on" : "choice");
+    button.type = "button";
+    button.append(el("strong", "", title), el("small", "", detail));
+    button.addEventListener("click", () => {
+      if (id === "custom") {
+        apply(
+          normalizeOnlineSettings({
+            ...rulesFor("custom", current.allowTouch, {
+              width: customWidth,
+              height: customHeight,
+              counts: customCounts,
+            }),
+            extraShot: current.extraShot,
+          })
+        );
+      } else {
+        apply(normalizeOnlineSettings({ ...rulesFor(id, current.allowTouch), extraShot: current.extraShot }));
+      }
+    });
+    choices.append(button);
+  }
+  parent.append(choices);
+
+  const touch = el("button", current.allowTouch ? "switch-row is-on" : "switch-row");
+  touch.type = "button";
+  touch.setAttribute("role", "switch");
+  touch.setAttribute("aria-checked", current.allowTouch ? "true" : "false");
+  touch.append(
+    el("strong", "", "Schiffe dürfen sich berühren"),
+    el("small", "", current.allowTouch ? "An: Kante an Kante und diagonal ok." : "Aus: Abstand, auch diagonal.")
+  );
+  touch.addEventListener("click", () => apply({ ...current, allowTouch: !current.allowTouch }));
+  parent.append(touch);
+
+  const again = el("button", current.extraShot ? "switch-row is-on" : "switch-row");
+  again.type = "button";
+  again.setAttribute("role", "switch");
+  again.setAttribute("aria-checked", current.extraShot ? "true" : "false");
+  again.append(
+    el("strong", "", "Bei Treffer nochmal schießen"),
+    el("small", "", current.extraShot ? "An: Nach Treffer oder Versenkt bleibt man dran." : "Aus: Immer abwechselnd.")
+  );
+  again.addEventListener("click", () => apply({ ...current, extraShot: !current.extraShot }));
+  parent.append(again);
+
+  if (current.mode === "custom") {
+    const sizes = el("div", "stack");
+    sizes.append(
+      sizeStepper(
+        "Breite",
+        current.width,
+        (value) => {
+          customWidth = value;
+          apply(
+            normalizeOnlineSettings({
+              ...rulesFor("custom", current.allowTouch, {
+                width: customWidth,
+                height: customHeight,
+                counts: customCounts,
+              }),
+              extraShot: current.extraShot,
+            })
+          );
+        },
+        (value) => `${value} · A–${COLS[value - 1]}`
+      )
+    );
+    sizes.append(
+      sizeStepper(
+        "Höhe",
+        current.height,
+        (value) => {
+          customHeight = value;
+          apply(
+            normalizeOnlineSettings({
+              ...rulesFor("custom", current.allowTouch, {
+                width: customWidth,
+                height: customHeight,
+                counts: customCounts,
+              }),
+              extraShot: current.extraShot,
+            })
+          );
+        },
+        (value) => `${value} · 1–${value}`
+      )
+    );
+    parent.append(sizes);
+    parent.append(el("h2", "group-label", "Gerade"));
+    for (const shape of SHAPES.filter((item) => item.form === "gerade")) {
+      const count = current.counts[shape.id] || 0;
+      const row = el("div", "counter");
+      const minus = el("button", "btn", "−");
+      minus.type = "button";
+      minus.disabled = count <= 0;
+      const plus = el("button", "btn", "+");
+      plus.type = "button";
+      plus.disabled = count >= MAX_COUNT;
+      const change = (nextCount) => {
+        customCounts = { ...customCounts, [shape.id]: nextCount };
+        apply(
+          normalizeOnlineSettings({
+            ...rulesFor("custom", current.allowTouch, {
+              width: customWidth,
+              height: customHeight,
+              counts: customCounts,
+            }),
+            extraShot: current.extraShot,
+          })
+        );
+      };
+      minus.addEventListener("click", () => change(count - 1));
+      plus.addEventListener("click", () => change(count + 1));
+      row.append(shapeIcon(shape.id), el("span", "counter-name", shape.name), minus, el("span", "counter-value", String(count)), plus);
+      parent.append(row);
+    }
+    parent.append(el("h2", "group-label", "Gewinkelt"));
+    for (const shape of SHAPES.filter((item) => item.form !== "gerade")) {
+      const count = current.counts[shape.id] || 0;
+      const row = el("div", "counter");
+      const minus = el("button", "btn", "−");
+      minus.type = "button";
+      minus.disabled = count <= 0;
+      const plus = el("button", "btn", "+");
+      plus.type = "button";
+      plus.disabled = count >= MAX_COUNT;
+      const change = (nextCount) => {
+        customCounts = { ...customCounts, [shape.id]: nextCount };
+        apply(
+          normalizeOnlineSettings({
+            ...rulesFor("custom", current.allowTouch, {
+              width: customWidth,
+              height: customHeight,
+              counts: customCounts,
+            }),
+            extraShot: current.extraShot,
+          })
+        );
+      };
+      minus.addEventListener("click", () => change(count - 1));
+      plus.addEventListener("click", () => change(count + 1));
+      row.append(shapeIcon(shape.id), el("span", "counter-name", shape.name), minus, el("span", "counter-value", String(count)), plus);
+      parent.append(row);
+    }
+    for (const preset of loadPresets()) {
+      const row = el("div", "preset");
+      const load = el("button", "btn", preset.name);
+      load.type = "button";
+      load.addEventListener("click", () => {
+        applyDraft(preset.rules);
+        apply(normalizeOnlineSettings({ ...draft, extraShot: current.extraShot }));
+      });
+      row.append(load);
+      parent.append(row);
+    }
+  } else {
+    const preview = el("div", "mini-ships");
+    for (const shape of SHAPES) {
+      for (let i = 0; i < (current.counts[shape.id] || 0); i += 1) preview.append(shapeIcon(shape.id));
+    }
+    parent.append(preview);
+  }
+  const check = assessFleet(current);
+  if (!check.ok) parent.append(el("p", "note is-bad", check.message || "Flotte passt nicht."));
+  else if (check.warning) parent.append(el("p", "note", check.warning));
+}
+
+async function handleOnlineAction(action) {
+  if (!iAmHost() || !onlineState) return;
+  const type = action?.type;
+  const from = action?.from;
+  if (type === "ready") {
+    const result = applyReady(onlineState, from, action.payload?.ships);
+    if (result.error) {
+      toast(result.error);
+      return;
+    }
+    await publishOnlineState(result.state);
+    return;
+  }
+  if (type === "shot") {
+    const c = Number(action.payload?.c);
+    const r = Number(action.payload?.r);
+    const fired = fireOnlineShot(onlineState, from, c, r);
+    if (fired.result === "ignore" || fired.result === "already") return;
+    await publishOnlineState(fired.state);
+    return;
+  }
+  if (type === "rematch") {
+    if (onlineState.phase !== "end") return;
+    const players = (onlineRoom?.players || []).map((player, index) => ({
+      id: player.id,
+      name: player.name,
+      seat: index,
+    }));
+    const next = beginOnlineRematch(onlineState, players);
+    lastShotSeqSeen = 0;
+    set(ONLINE_DRAFT_KEY, null);
+    await publishOnlineState(next);
+  }
+}
+
+async function enterOnline() {
+  if (enteringOnline && lobbyHandle) return;
+  enteringOnline = true;
+  playMode = "online";
+  try {
+    const [lobbyMod, api] = await Promise.all([
+      import("../../shared/lobby.js"),
+      import("../../shared/online.js"),
+    ]);
+    onlineApi = api;
+    lobbyHandle?.destroy();
+    const initial = normalizeOnlineSettings({
+      ...draft,
+      extraShot,
+    });
+    lobbyHandle = lobbyMod.mountLobby(app, {
+      gameId: "schiffe",
+      title: "Schiffe versenken",
+      lead: "Genau zwei Spieler. Zuerst den Raum, dann die Regeln.",
+      minPlayers: 2,
+      maxPlayers: 2,
+      settingsPanel: {
+        initial,
+        summarize: summarizeOnlineSettings,
+        render(container, { settings: current, onChange }) {
+          const paint = (settings) => {
+            const top = container.parentElement?.closest(".screen-body")?.scrollTop ?? 0;
+            container.innerHTML = "";
+            appendOnlineSettingsControls(container, normalizeOnlineSettings(settings), (next) => {
+              draft = next;
+              extraShot = next.extraShot !== false;
+              rememberCustom(next);
+              paint(next);
+              onChange(next);
+            });
+            const scroller = container.parentElement?.closest(".screen-body");
+            if (scroller) {
+              scroller.scrollTop = top;
+              requestAnimationFrame(() => {
+                scroller.scrollTop = top;
+              });
+            }
+          };
+          paint(current);
+        },
+      },
+      async onBeforeStart(room) {
+        const settings = normalizeOnlineSettings(room.settings || draft);
+        const check = assessFleet(settings);
+        if (!check.ok) throw new Error(check.message || "Flotte passt nicht aufs Feld.");
+        const players = room.players.slice(0, 2);
+        const next = beginOnlineMatch(players, settings);
+        await onlineApi.setState(next);
+        onlineState = next;
+      },
+      onStart(room) {
+        beginOnlinePlay(room);
+      },
+      onLeave() {
+        lobbyHandle = null;
+        enteringOnline = false;
+        playMode = null;
+        state = freshState();
+        render();
+      },
+    });
+  } catch (err) {
+    enteringOnline = false;
+    playMode = null;
+    reportError("Lobby", err);
+    render();
+  }
+}
+
+function beginOnlinePlay(room) {
+  try {
+    lobbyHandle?.destroy();
+    lobbyHandle = null;
+    enteringOnline = false;
+    playMode = "online";
+    onlineRoom = room;
+    const incoming = room?.state ? migrateOnlineState(room.state) : onlineState;
+    if (incoming) {
+      lastShotSeqSeen = incoming.lastShot?.seq || 0;
+      adoptOnlineState(incoming, { silent: true });
+    }
+    clearOnlineSubs();
+    unsubRoom = onlineApi.onRoomChange((next) => {
+      if (!next || next.status === "kicked") {
+        const kicked = next?.status === "kicked";
+        leaveOnline().then(() => {
+          playMode = null;
+          state = freshState();
+          toast(kicked ? "Du wurdest entfernt." : "Der Raum wurde geschlossen.");
+          render();
+        });
+        return;
+      }
+      onlineRoom = next;
+      if (next.state) adoptOnlineState(next.state);
+      else render();
+    });
+    unsubAction = onlineApi.onAction((action) => {
+      handleOnlineAction(action).catch((err) => reportError("Aktion", err));
+    });
+    unsubNet = onlineApi.onConnectionChange(() => render());
+    render();
+  } catch (err) {
+    reportError("Online-Spiel", err);
+    leaveOnline().then(() => {
+      playMode = null;
+      state = freshState();
+      render();
+    });
+  }
+}
+
 function renderVersus() {
   document.body.classList.remove("is-battle");
   const view = el("section", "screen setup");
@@ -551,11 +1077,14 @@ function renderVersus() {
   const dock = el("div", "screen-dock");
   body.append(backLink());
   body.append(el("h1", "", "Schiffe versenken"));
-  body.append(el("p", "lead", "Zu zweit per Zurufen oder allein gegen den Bot."));
+  body.append(el("p", "lead", "Zu zweit am Tisch, online auf zwei Handys oder allein gegen den Bot."));
   if (bootNotice) body.append(el("p", "note is-warn", bootNotice));
   const hotseat = el("button", "choice", "");
   hotseat.type = "button";
-  hotseat.append(el("strong", "", "Zu zweit (Zurufen)"), el("small", "", "Zwei Handys, Schüsse werden zugerufen."));
+  hotseat.append(
+    el("strong", "", "Zu zweit am Tisch (Zurufen)"),
+    el("small", "", "Zwei Handys, Schüsse werden zugerufen.")
+  );
   hotseat.addEventListener("click", () => {
     playMode = "hotseat";
     render();
@@ -567,7 +1096,17 @@ function renderVersus() {
     playMode = "bot";
     render();
   });
-  body.append(hotseat, bot);
+  const online = el("button", "choice", "");
+  online.type = "button";
+  online.append(
+    el("strong", "", "Online (zwei Handys)"),
+    el("small", "", "Raum erstellen oder beitreten. Host prüft die Schüsse.")
+  );
+  online.addEventListener("click", () => {
+    playMode = "online";
+    enterOnline();
+  });
+  body.append(hotseat, bot, online);
   view.append(body, dock);
   app.replaceChildren(view);
 }
@@ -652,9 +1191,9 @@ function renderSettings() {
   });
 
   body.append(choices, touch);
-  if (!isBot()) {
-    body.append(codeLine(encodeRules(draft)));
-    const codeButton = el("button", "btn", "Code eingeben");
+  if (!isBot() && !isOnline()) {
+    body.append(codeLine(encodeRules(draft), { hint: true }));
+    const codeButton = el("button", "btn", "Code vom Mitspieler eingeben");
     codeButton.type = "button";
     codeButton.addEventListener("click", askCode);
     body.append(codeButton);
@@ -794,14 +1333,29 @@ function renderPlace() {
   bar.append(el("span", "spacer"), fresh);
   view.append(bar);
   view.append(el("h1", "", "Schiffe legen"));
-  if (!isBot()) view.append(codeLine(state.code));
+  if (isOnline()) {
+    const me = myOnlineId();
+    const other = opponentId(onlineState || state, me);
+    const iReady = Boolean(onlineState?.ready?.[me]);
+    const theyReady = Boolean(other && onlineState?.ready?.[other]);
+    view.append(
+      el(
+        "p",
+        "lead",
+        theyReady ? "Gegner ist bereit." : "Gegner legt noch."
+      )
+    );
+    if (iReady) view.append(el("p", "note", "Du bist bereit – warte auf den Gegner …"));
+  } else if (!isBot()) view.append(codeLine(state.code, { hint: true }));
   else view.append(el("p", "lead", `Bot · ${DIFFICULTIES.find((item) => item[0] === state.difficulty)?.[1] || "Mittel"}`));
 
   const grid = makeGrid("place");
   view.append(grid);
 
   let pointer = null;
+  const placeLocked = isOnline() && Boolean(onlineState?.ready?.[myOnlineId()]);
   grid.addEventListener("pointerdown", (event) => {
+    if (placeLocked) return;
     const button = event.target.closest(".cell");
     if (!button || event.button !== 0) return;
     const c = Number(button.dataset.c);
@@ -909,11 +1463,46 @@ function renderPlace() {
     dock.append(chip);
   }
 
-  const done = el("button", "btn primary", "Fertig");
+  const meReady = isOnline() && Boolean(onlineState?.ready?.[myOnlineId()]);
+  if (isOnline() && meReady) {
+    tools.querySelectorAll("button").forEach((button) => {
+      button.disabled = true;
+    });
+    dock.querySelectorAll("button").forEach((button) => {
+      button.disabled = true;
+    });
+  }
+
+  const done = el("button", "btn primary", isOnline() ? (meReady ? "Bereit …" : "Bereit") : "Fertig");
   done.type = "button";
-  done.disabled = !allPlaced(state.ships);
-  done.addEventListener("click", () => {
-    if (!allPlaced(state.ships)) return;
+  done.disabled = !allPlaced(state.ships) || meReady || onlineBusy;
+  done.addEventListener("click", async () => {
+    if (!allPlaced(state.ships) || meReady) return;
+    if (isOnline()) {
+      saveOnlineDraft();
+      done.disabled = true;
+      done.textContent = "Bereit …";
+      try {
+        if (iAmHost()) {
+          const result = applyReady(onlineState, myOnlineId(), state.ships);
+          if (result.error) {
+            toast(result.error);
+            done.disabled = false;
+            done.textContent = "Bereit";
+            return;
+          }
+          await publishOnlineState(result.state);
+        } else {
+          await onlineApi.sendAction({ type: "ready", payload: { ships: state.ships } });
+          toast("Bereit gemeldet.");
+        }
+      } catch (err) {
+        reportError("Bereit", err);
+        done.disabled = false;
+        done.textContent = "Bereit";
+      }
+      return;
+    }
     const next = beginBattle(state);
     if (!next) {
       toast("Der Bot findet keinen Platz. Bitte andere Einstellungen.");
@@ -985,12 +1574,18 @@ function scheduleBotShot() {
 function renderBattle() {
   document.body.classList.add("is-battle");
   tabMode = tabLock || wantsTabs();
+  if (isOnline() && state.phase === "battle" && tabMode && !flashCell) {
+    if (lastOnlineTurn !== state.turn) {
+      lastOnlineTurn = state.turn;
+      boardTab = state.turn === "player" ? "enemy" : "own";
+    }
+  }
   const bar = el("div", "battle-bar");
   bar.append(backLink());
   const fresh = el("button", "btn", "Neues Spiel");
   fresh.type = "button";
   fresh.addEventListener("click", askNewGame);
-  if (isBot()) {
+  if (isBot() || isOnline()) {
     bar.append(el("span", "spacer"), fresh);
   } else {
     const undoButton = el("button", "btn", "Rückgängig");
@@ -1028,19 +1623,51 @@ function renderBattle() {
     fleetRow("Ich", state.ships.map((ship) => ({ shapeId: ship.shapeId, sunk: ownSunk(ship) })), true)
   );
 
-  if (isBot() && state.turn === "bot" && state.phase === "battle") {
+  if (isOnline() && !opponentOnline()) {
+    battle.append(el("p", "bot-banner wait-banner", "Gegner nicht verbunden – warte …"));
+  } else if (isOnline() && state.phase === "battle") {
+    battle.append(
+      el("p", state.turn === "player" ? "bot-banner your-turn" : "bot-banner", state.turn === "player" ? "Du bist dran" : "Gegner ist dran")
+    );
+  } else if (isBot() && state.turn === "bot" && state.phase === "battle") {
     battle.append(el("p", "bot-banner", "Bot ist dran"));
   }
 
   const enemyBlock = el("div", "board-block");
   enemyBlock.append(el("p", "board-title", isBot() ? "Feld des Bots" : "Gegnerisches Feld"));
   const enemyGrid = makeGrid("enemy");
-  if (isBot() && state.turn !== "player") enemyGrid.classList.add("is-locked");
-  enemyGrid.addEventListener("click", (event) => {
+  const onlineLocked =
+    isOnline() &&
+    (state.turn !== "player" || state.phase !== "battle" || !opponentOnline() || onlineBusy);
+  if ((isBot() && state.turn !== "player") || onlineLocked) enemyGrid.classList.add("is-locked");
+  enemyGrid.addEventListener("click", async (event) => {
     const button = event.target.closest(".cell");
     if (!button) return;
     const c = Number(button.dataset.c);
     const r = Number(button.dataset.r);
+    if (isOnline()) {
+      if (onlineLocked) return;
+      if (state.enemy[r][c]) {
+        toast("Schon beschossen");
+        return;
+      }
+      try {
+        if (iAmHost()) {
+          const fired = fireOnlineShot(onlineState, myOnlineId(), c, r);
+          if (fired.result === "already") {
+            toast("Schon beschossen");
+            return;
+          }
+          if (fired.result === "ignore") return;
+          await publishOnlineState(fired.state);
+        } else {
+          await onlineApi.sendAction({ type: "shot", payload: { c, r } });
+        }
+      } catch (err) {
+        reportError("Schuss", err);
+      }
+      return;
+    }
     if (isBot()) {
       if (state.turn !== "player" || state.phase !== "battle") return;
       const fired = fireAtBot(state, c, r);
@@ -1074,7 +1701,7 @@ function renderBattle() {
   const ownBlock = el("div", "board-block");
   ownBlock.append(el("p", "board-title", "Mein Feld"));
   const ownGrid = makeGrid("own");
-  if (!isBot()) {
+  if (!isBot() && !isOnline()) {
     ownGrid.addEventListener("click", async (event) => {
       const button = event.target.closest(".cell");
       if (!button) return;
@@ -1105,10 +1732,10 @@ function renderBattle() {
   if (tabMode) battle.append(status, boardTab === "own" ? ownBlock : enemyBlock);
   else battle.append(enemyBlock, status, ownBlock);
 
-  if (isBot()) app.replaceChildren(bar, battle);
+  if (isBot() || isOnline()) app.replaceChildren(bar, battle);
   else app.replaceChildren(bar, codeLine(state.code), battle);
 
-  if (!isBot() && pendingMenu && (!tabMode || boardTab === "enemy")) {
+  if (!isBot() && !isOnline() && pendingMenu && (!tabMode || boardTab === "enemy")) {
     const menu = el("div", "mark-menu");
     menu.setAttribute("role", "dialog");
     menu.setAttribute("aria-label", "Schuss eintragen");
@@ -1171,9 +1798,63 @@ function renderEnd() {
   document.body.classList.remove("is-battle");
   const view = el("section", "end-screen");
   view.append(backLink());
-  if (!isBot()) view.append(codeLine(state.code));
+  if (!isBot() && !isOnline()) view.append(codeLine(state.code));
   view.append(el("h1", "", state.outcome === "won" ? "Gewonnen" : "Verloren"));
   const mine = ownShotStats(state);
+  if (isOnline() && onlineState) {
+    const me = myOnlineId();
+    const other = opponentId(onlineState, me);
+    const myStats = shotStatsFor(onlineState, me);
+    const theirStats = shotStatsFor(onlineState, other);
+    const myName = onlineState.playerNames?.[me] || "Du";
+    const theirName = onlineState.playerNames?.[other] || "Gegner";
+    view.append(el("p", "lead", `${myName}: ${myStats.shots} Schüsse · Trefferquote ${myStats.rate} %`));
+    view.append(el("p", "lead", `${theirName}: ${theirStats.shots} Schüsse · Trefferquote ${theirStats.rate} %`));
+    view.append(el("h2", "", "Flotte des Gegners"));
+    const enemyGrid = makeGrid("reveal-bot");
+    enemyGrid.classList.add("end-grid");
+    for (const button of enemyGrid.querySelectorAll(".cell")) button.disabled = true;
+    view.append(enemyGrid);
+    view.append(el("h2", "", "Mein Feld"));
+    const grid = makeGrid("reveal");
+    grid.classList.add("end-grid");
+    for (const button of grid.querySelectorAll(".cell")) button.disabled = true;
+    view.append(grid);
+    const rematch = el("button", "btn primary", "Revanche");
+    rematch.type = "button";
+    rematch.disabled = onlineBusy;
+    rematch.addEventListener("click", async () => {
+      rematch.disabled = true;
+      try {
+        if (iAmHost()) {
+          const players = (onlineRoom?.players || []).map((player, index) => ({
+            id: player.id,
+            name: player.name,
+            seat: index,
+          }));
+          const next = beginOnlineRematch(onlineState, players);
+          lastShotSeqSeen = 0;
+          set(ONLINE_DRAFT_KEY, null);
+          await publishOnlineState(next);
+        } else {
+          await onlineApi.sendAction({ type: "rematch", payload: {} });
+          toast("Revanche angefragt …");
+        }
+      } catch (err) {
+        reportError("Revanche", err);
+        rematch.disabled = false;
+      }
+    });
+    const hub = el("a", "btn", "Zum Hub");
+    hub.href = "../../index.html";
+    const row = el("div", "btn-row");
+    row.append(rematch, hub);
+    view.append(row);
+    app.replaceChildren(view);
+    sizeEndGrid(enemyGrid, view);
+    sizeEndGrid(grid, view);
+    return;
+  }
   if (isBot()) {
     const bot = incomingShotStats(state);
     view.append(el("p", "lead", `Du: ${mine.shots} Schüsse · Trefferquote ${mine.rate} %`));
@@ -1231,6 +1912,7 @@ let showingResume = false;
 
 function draw() {
   preserveScreenScroll(app, () => {
+    if (playMode === "online" && (enteringOnline || lobbyHandle)) return;
     document.body.dataset.phase = showingResume ? "resume" : state.phase;
     if (showingResume) {
       renderResumeScreen();
@@ -1301,6 +1983,12 @@ function boot() {
   document.title = "Schiffe versenken – Kajütenspiele";
   requestWakeLock();
   initUpdates();
+  const session = get(ROOM_SESSION_KEY, null);
+  if (wantsOnline() || (session && session.gameId === "schiffe")) {
+    playMode = "online";
+    enterOnline();
+    return;
+  }
   const hotseat = readSave(get(STORAGE_KEY, null));
   const bot = readSave(get(BOT_KEY, null));
   bootNotice = hotseat.notice || bot.notice;

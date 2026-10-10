@@ -58,6 +58,7 @@ function errorMessage(err) {
   if (err?.code === "auth/operation-not-allowed") {
     return "Anonyme Anmeldung ist in der Firebase-Konsole noch nicht aktiv.";
   }
+  if (err?.code === "full") return "Raum ist voll";
   return err?.message || "Etwas ist schiefgelaufen.";
 }
 
@@ -285,7 +286,7 @@ export function mountLobby(root, options = {}) {
     render();
     try {
       await withTimeout(
-        joinRoom(pendingCode, pendingName),
+        joinRoom(pendingCode, pendingName, { maxPlayers }),
         20000,
         "Zeitüberschreitung beim Beitreten. Code und Netz prüfen."
       );
