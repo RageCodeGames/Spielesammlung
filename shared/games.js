@@ -46,6 +46,6 @@ export const games = [
     description: "Zeichnen und erraten, jedes Handy für sich.",
     emoji: "✏️",
     href: "./games/malen/index.html",
-    available: true,
+    available: false,
   },
 ];
