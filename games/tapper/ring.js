@@ -1,9 +1,10 @@
-/** Buchstaben-Ring: Seiten zwischen freien Ecken, keine Überlappung. */
+/** Buchstaben-Ring: Seiten zwischen freien Ecken, gegen den Uhrzeigersinn. */
 
 export const RING_MIN_GAP = 6;
 const EDGE = 4;
 const MIN_SIZE = 28;
-const SIDES = ["top", "right", "bottom", "left"];
+/** Unten → rechts → oben → links: von jeder Seite alphabetisch von links nach rechts. */
+const SIDES = ["bottom", "right", "top", "left"];
 const ROT = { top: 180, right: -90, bottom: 0, left: 90 };
 
 function roundCounts(n, lengths) {
@@ -28,7 +29,7 @@ function sizeLimit(sideLen, count, gap) {
 }
 
 function tileSize(width, height, counts, gap) {
-  const [top, right, bottom, left] = counts;
+  const [bottom, right, top, left] = counts;
   const raw = Math.min(
     sizeLimit(width, top, gap),
     sizeLimit(width, bottom, gap),
@@ -51,25 +52,36 @@ function sidePlacements(side, count, size, gap, width, height) {
   const lastX = width - EDGE - 2 * size - gap;
   const lastY = height - EDGE - 2 * size - gap;
   const rot = ROT[side];
-  if (side === "top") {
-    return alongSide(count, size, gap, first, lastX).map((x) => ({ x, y: EDGE, rot, side }));
-  }
-  if (side === "right") {
-    return alongSide(count, size, gap, first, lastY).map((y) => ({
-      x: width - EDGE - size,
-      y,
+  // Von der Person an der Seite: links → rechts alphabetisch.
+  if (side === "bottom") {
+    return alongSide(count, size, gap, first, lastX).map((x) => ({
+      x,
+      y: height - EDGE - size,
       rot,
       side,
     }));
   }
-  if (side === "bottom") {
+  if (side === "right") {
+    return alongSide(count, size, gap, first, lastY)
+      .reverse()
+      .map((y) => ({
+        x: width - EDGE - size,
+        y,
+        rot,
+        side,
+      }));
+  }
+  if (side === "top") {
     return alongSide(count, size, gap, first, lastX)
       .reverse()
-      .map((x) => ({ x, y: height - EDGE - size, rot, side }));
+      .map((x) => ({ x, y: EDGE, rot, side }));
   }
-  return alongSide(count, size, gap, first, lastY)
-    .reverse()
-    .map((y) => ({ x: EDGE, y, rot, side }));
+  return alongSide(count, size, gap, first, lastY).map((y) => ({
+    x: EDGE,
+    y,
+    rot,
+    side,
+  }));
 }
 
 export function planLetterRing(width, height, n, gap = RING_MIN_GAP) {
@@ -102,6 +114,17 @@ export function ringHasOverlap(plan, minGap = RING_MIN_GAP) {
     }
   }
   return false;
+}
+
+/** Prüft, dass auf jeder Seite die Positionen für den Sitzenden links→rechts laufen. */
+export function sideReadsLeftToRight(plan) {
+  const bySide = { bottom: [], right: [], top: [], left: [] };
+  for (const pos of plan.positions) bySide[pos.side].push(pos);
+  const bottomOk = bySide.bottom.every((p, i, arr) => i === 0 || p.x > arr[i - 1].x);
+  const rightOk = bySide.right.every((p, i, arr) => i === 0 || p.y < arr[i - 1].y);
+  const topOk = bySide.top.every((p, i, arr) => i === 0 || p.x < arr[i - 1].x);
+  const leftOk = bySide.left.every((p, i, arr) => i === 0 || p.y > arr[i - 1].y);
+  return bottomOk && rightOk && topOk && leftOk;
 }
 
 export function layoutLetterRing(stage, buttons, center) {
