@@ -5,6 +5,7 @@ import {
   createRoom,
   getStoredName,
   initOnline,
+  restoreSession,
   joinCodeFromUrl,
   joinRoom,
   joinUrl,
@@ -93,6 +94,11 @@ export function mountLobby(root, options = {}) {
   let settingsOpen = false;
   let entryStep = joinPrefill ? "join" : "choice";
   let lastRoomFinger = "";
+  let busy = false;
+  let busyLabel = "";
+  let lastError = "";
+  let pendingName = getStoredName();
+  let pendingCode = joinPrefill;
 
   function roomFingerprint(room) {
     if (!room) return "";
@@ -114,6 +120,7 @@ export function mountLobby(root, options = {}) {
   const unsubRoom = onRoomChange((next) => {
     snapshot = next;
     if (destroyed) return;
+    if (busy && !next) return;
     if (next?.status === "playing" && !started) {
       started = true;
       try {
@@ -145,8 +152,33 @@ export function mountLobby(root, options = {}) {
   window.addEventListener("online", onBrowserNet);
   window.addEventListener("offline", onBrowserNet);
 
+  function withTimeout(promise, ms, message) {
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        reject(new OnlineError("timeout", message));
+      }, ms);
+      promise.then(
+        (value) => {
+          window.clearTimeout(timer);
+          resolve(value);
+        },
+        (err) => {
+          window.clearTimeout(timer);
+          reject(err);
+        }
+      );
+    });
+  }
+
+  function setBusy(label) {
+    busy = Boolean(label);
+    busyLabel = label || "";
+    if (label) lastError = "";
+  }
+
   function hint(text, sticky = false) {
-    const note = body.querySelector(".lobby-hint");
+    if (text && sticky) lastError = text;
+    const note = body.querySelector(".lobby-hint") || dock.querySelector(".lobby-hint");
     if (note) {
       note.textContent = text;
       note.hidden = !text;
@@ -156,6 +188,14 @@ export function mountLobby(root, options = {}) {
       hintTimer = window.setTimeout(() => {
         if (note) note.hidden = true;
       }, 2400);
+    }
+  }
+
+  function appendDockStatus() {
+    if (lastError) {
+      const note = el("p", "note is-bad lobby-hint");
+      note.textContent = lastError;
+      dock.append(note);
     }
   }
 
@@ -177,13 +217,17 @@ export function mountLobby(root, options = {}) {
     hint(ok ? "Link kopiert" : url);
   }
 
-  function nameField(value = getStoredName()) {
+  function nameField(value = pendingName || getStoredName()) {
     const nameLabel = el("label", "lobby-field", "Dein Name");
     const nameInput = el("input", "text-input");
     nameInput.name = "name";
     nameInput.autocomplete = "nickname";
     nameInput.maxLength = 20;
     nameInput.value = value;
+    nameInput.disabled = busy;
+    nameInput.addEventListener("input", () => {
+      pendingName = nameInput.value;
+    });
     nameLabel.append(nameInput);
     return nameLabel;
   }
@@ -197,10 +241,12 @@ export function mountLobby(root, options = {}) {
     codeInput.maxLength = 4;
     codeInput.placeholder = "z. B. K7P3";
     codeInput.value = value;
+    codeInput.disabled = busy;
     codeInput.addEventListener("input", () => {
       const caret = codeInput.selectionStart;
       const next = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
       codeInput.value = next;
+      pendingCode = next;
       try {
         codeInput.setSelectionRange(caret, caret);
       } catch {
@@ -212,21 +258,43 @@ export function mountLobby(root, options = {}) {
   }
 
   async function onCreate() {
-    const name = body.querySelector("[name=name]")?.value;
+    if (busy) return;
+    pendingName = body.querySelector("[name=name]")?.value ?? pendingName;
+    setBusy("Raum wird erstellt …");
+    render();
     try {
-      await createRoom(gameId, name, snapshot?.settings || settings);
+      await withTimeout(
+        createRoom(gameId, pendingName, snapshot?.settings || settings),
+        20000,
+        "Zeitüberschreitung beim Anlegen. Netz prüfen oder später nochmal versuchen."
+      );
     } catch (err) {
       showError(hint, err, true);
+      lastError = errorMessage(err);
+    } finally {
+      setBusy("");
+      if (!destroyed && !snapshot) render();
     }
   }
 
   async function onJoin() {
-    const name = body.querySelector("[name=name]")?.value;
-    const code = body.querySelector("[name=code]")?.value;
+    if (busy) return;
+    pendingName = body.querySelector("[name=name]")?.value ?? pendingName;
+    pendingCode = body.querySelector("[name=code]")?.value ?? pendingCode;
+    setBusy("Tritt bei …");
+    render();
     try {
-      await joinRoom(code, name);
+      await withTimeout(
+        joinRoom(pendingCode, pendingName),
+        20000,
+        "Zeitüberschreitung beim Beitreten. Code und Netz prüfen."
+      );
     } catch (err) {
       showError(hint, err, true);
+      lastError = errorMessage(err);
+    } finally {
+      setBusy("");
+      if (!destroyed && !snapshot) render();
     }
   }
 
@@ -344,6 +412,7 @@ export function mountLobby(root, options = {}) {
     });
     body.append(create, join);
     appendHint();
+    if (lastError) body.append(el("p", "note is-bad", lastError));
   }
 
   function renderCreate() {
@@ -358,15 +427,20 @@ export function mountLobby(root, options = {}) {
     body.append(el("p", "lead", "Name eingeben – der Raum wird sofort angelegt."));
     body.append(nameField());
     appendHint();
-    const go = el("button", "btn primary", "Raum erstellen");
+    const go = el("button", "btn primary", busy ? "Raum wird erstellt …" : "Raum erstellen");
     go.type = "button";
+    go.disabled = busy;
     go.addEventListener("click", onCreate);
     const back = el("button", "btn", "Zurück");
     back.type = "button";
+    back.disabled = busy;
     back.addEventListener("click", () => {
+      if (busy) return;
+      lastError = "";
       entryStep = "choice";
       render();
     });
+    appendDockStatus();
     dock.append(go, back);
   }
 
@@ -381,17 +455,22 @@ export function mountLobby(root, options = {}) {
     body.append(el("h1", null, "Raum beitreten"));
     body.append(el("p", "lead", "Code und Namen eingeben."));
     body.append(nameField());
-    body.append(codeField(joinPrefill));
+    body.append(codeField(pendingCode || joinPrefill));
     appendHint();
-    const go = el("button", "btn primary", "Beitreten");
+    const go = el("button", "btn primary", busy ? "Tritt bei …" : "Beitreten");
     go.type = "button";
+    go.disabled = busy;
     go.addEventListener("click", onJoin);
     const back = el("button", "btn", "Zurück");
     back.type = "button";
+    back.disabled = busy;
     back.addEventListener("click", () => {
+      if (busy) return;
+      lastError = "";
       entryStep = "choice";
       render();
     });
+    appendDockStatus();
     dock.append(go, back);
   }
 
@@ -547,7 +626,9 @@ export function mountLobby(root, options = {}) {
   }
 
   initOnline()
-    .then(() => {
+    .then(async () => {
+      if (destroyed) return;
+      if (!busy && !snapshot && entryStep === "choice") await restoreSession();
       if (!destroyed) render();
     })
     .catch((err) => {
@@ -555,8 +636,9 @@ export function mountLobby(root, options = {}) {
       console.error("[lobby] Anmeldung", err);
       if (err instanceof OnlineError && err.code === "offline") renderOffline();
       else {
+        lastError = errorMessage(err);
         render();
-        hint(errorMessage(err), true);
+        hint(lastError, true);
       }
     });
 

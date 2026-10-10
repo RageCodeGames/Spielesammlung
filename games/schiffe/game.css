@@ -1,12 +1,8 @@
 body.schiffe #app {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
   overflow: hidden;
 }
 
-body.schiffe.is-battle #app {
+body.schiffe.is-battle .battle {
   width: min(100%, 42rem);
   margin-inline: auto;
 }

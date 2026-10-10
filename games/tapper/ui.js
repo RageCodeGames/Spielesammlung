@@ -41,13 +41,13 @@ import { get, set } from "../../shared/storage.js";
 import { preserveScreenScroll } from "../../shared/scroll.js";
 import { requestWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
+import { layoutLetterRing } from "./ring.js";
 
 const GAME_KEY = "kajuete:tapper";
 const SETTINGS_KEY = "kajuete:tapper-settings";
 const NAMES_KEY = "kajuete:tapper-names";
 const CATS_KEY = "kajuete:tapper-kategorien";
 const FREE_KEY = "kajuete:tapper-freie-kategorien";
-const ROOM_SESSION_KEY = "kajuete:online-room";
 
 let state = null;
 let step = "mode";
@@ -74,6 +74,7 @@ let unsubBadge = null;
 let userPausedBeforeWait = false;
 let lastTurnKey = "";
 let enteringOnline = false;
+let ringObserver = null;
 
 const app = document.getElementById("app");
 
@@ -408,12 +409,10 @@ function applyNames(next) {
 
 function wantsOnline() {
   try {
-    if (new URL(location.href).searchParams.get("join")) return true;
+    return Boolean(new URL(location.href).searchParams.get("join"));
   } catch {
-    /* egal */
+    return false;
   }
-  const session = get(ROOM_SESSION_KEY, null);
-  return Boolean(session && session.gameId === "tapper");
 }
 
 function clearOnlineSubs() {
@@ -656,7 +655,7 @@ function renderMode() {
   if (bootNotice) body.append(el("p", "note is-bad", bootNotice));
   const localBtn = el("button", "choice", "");
   localBtn.type = "button";
-  localBtn.append(el("strong", "", "Ein Handy"), el("small", "", "Ein Gerät in die Mitte. Wer dran ist, tippt den Buchstaben."));
+  localBtn.append(el("strong", "", "Ein Handy (in die Mitte legen)"), el("small", "", "Ein Gerät in die Mitte. Wer dran ist, tippt den Buchstaben."));
   localBtn.addEventListener("click", () => {
     playMode = "local";
     step = "players";
@@ -746,7 +745,20 @@ function renderPlayers() {
   app.replaceChildren(view);
 }
 
-function appendSettingsControls(parent, current, apply) {
+function appendSettingsControls(parent, current, apply, options = {}) {
+  if (options.showLayout) {
+    parent.append(el("h2", "group-label", "Anordnung"));
+    const ring = el("button", current.layout !== "grid" ? "choice is-on" : "choice");
+    ring.type = "button";
+    ring.append(el("strong", "", "Ring"), el("small", "", "Buchstaben am Rand. Handy flach in die Mitte legen."));
+    ring.addEventListener("click", () => apply({ ...current, layout: "ring" }));
+    const grid = el("button", current.layout === "grid" ? "choice is-on" : "choice");
+    grid.type = "button";
+    grid.append(el("strong", "", "Raster"), el("small", "", "Buchstaben als Gitter, wie bisher."));
+    grid.addEventListener("click", () => apply({ ...current, layout: "grid" }));
+    parent.append(ring, grid);
+  }
+
   parent.append(el("h2", "group-label", "Timer"));
   const timers = el("div", "choices");
   for (const timer of Object.values(TIMERS)) {
@@ -882,10 +894,15 @@ function renderSettings() {
   body.append(backLink());
   body.append(el("h1", "", "Einstellungen"));
 
-  appendSettingsControls(body, draft, (next) => {
-    draft = next;
-    render();
-  });
+  appendSettingsControls(
+    body,
+    draft,
+    (next) => {
+      draft = next;
+      render();
+    },
+    { showLayout: true }
+  );
 
   const back = el("button", "btn", "Zu den Spielern");
   back.type = "button";
@@ -909,7 +926,150 @@ function renderSettings() {
   app.replaceChildren(view);
 }
 
-function renderPlay() {
+function useLetterRing() {
+  return !isOnline() && state?.settings?.layout !== "grid";
+}
+
+function setRingLock(on) {
+  document.documentElement.classList.toggle("tapper-ring", on);
+  document.body.classList.toggle("tapper-ring", on);
+  try {
+    if (on) screen.orientation?.lock?.("portrait");
+    else screen.orientation?.unlock?.();
+  } catch {
+    /* Lock nur in installierter App / Fullscreen */
+  }
+}
+
+function stopRingLayout() {
+  if (ringObserver) {
+    ringObserver.disconnect();
+    ringObserver = null;
+  }
+  setRingLock(false);
+}
+
+function bindRingLayout(stage, buttons, center) {
+  if (ringObserver) {
+    ringObserver.disconnect();
+    ringObserver = null;
+  }
+  const place = () => layoutLetterRing(stage, buttons, center);
+  place();
+  requestAnimationFrame(place);
+  if (typeof ResizeObserver !== "undefined") {
+    ringObserver = new ResizeObserver(place);
+    ringObserver.observe(stage);
+  }
+}
+
+function letterButtons() {
+  const nodes = [];
+  const active = enabledLetters(state.settings);
+  const lettersBlocked = !state.started || state.paused || state.needCategory || hostMissing();
+  const canTap = !lettersBlocked && (!isOnline() || isMyTurn());
+  for (const letter of active) {
+    const locked = (state.locked || []).includes(letter);
+    const watch = isOnline() && !isMyTurn() && !locked;
+    const button = el("button", `letter${locked ? " is-locked" : ""}${watch ? " is-watch" : ""}`, letter);
+    button.type = "button";
+    button.disabled = locked || !canTap;
+    button.addEventListener("click", () => onLetter(letter));
+    nodes.push(button);
+  }
+  return nodes;
+}
+
+function roundHintText() {
+  return state.settings.endMode === "bombs" && state.settings.scoring === "bombs"
+    ? `Runde ${state.round} · bis ${state.settings.bombLimit} Bombenpunkte`
+    : `Runde ${state.round} von ${state.settings.rounds}`;
+}
+
+function appendPlayActions(parent) {
+  const who = state.players[state.current];
+  const hostControls = !isOnline() || iAmHost();
+  if (!state.started) {
+    let freeField = null;
+    if (isFreeMode(state.settings) && hostControls) {
+      freeField = appendFreeCategoryForm(parent, {
+        title: "Sprecht eine Kategorie ab",
+      });
+    } else if (isFreeMode(state.settings)) {
+      parent.append(el("p", "lead", "Der Host legt die Kategorie fest."));
+    }
+    if (hostControls) {
+      const start = el("button", "btn primary", "Start");
+      start.type = "button";
+      start.addEventListener("click", () => {
+        if (isFreeMode(state.settings)) {
+          const typed = freeField ? freeField.value : freeDraft;
+          rememberFreeCategory(typed);
+          state = setFreeCategory(state, typed);
+          freeDraft = "";
+        }
+        publishState(startTurn(state, Date.now()));
+        unlock();
+      });
+      parent.append(start);
+      if (!isFreeMode(state.settings)) {
+        const other = el("button", "btn", "Andere Kategorie");
+        other.type = "button";
+        other.addEventListener("click", () => {
+          publishState(otherCategory(state, allCategories()));
+        });
+        parent.append(other);
+      }
+    } else {
+      parent.append(el("p", "lead", "Warten auf den Host …"));
+    }
+    return;
+  }
+  if (state.needCategory) return;
+  if (!hostControls) return;
+  const invalid = el("button", "btn", "Ungültig");
+  invalid.type = "button";
+  invalid.disabled = state.paused;
+  invalid.addEventListener("click", () => {
+    const late = checkDeadline(state, Date.now());
+    if (late.effect === "boom") {
+      burst(late);
+      return;
+    }
+    const rejected = rejectTerm(state);
+    if (rejected.effect !== "boom") return;
+    burst(rejected);
+  });
+  const pauseBtn = el("button", "btn", "Pause");
+  pauseBtn.type = "button";
+  pauseBtn.disabled = state.paused;
+  pauseBtn.addEventListener("click", () => {
+    publishState(pause(state));
+  });
+  const row = el("div", "btn-row");
+  row.append(invalid, pauseBtn);
+  parent.append(row);
+  if (isOnline() && !currentSeatOnline() && !state.paused) {
+    const skip = el("button", "btn", `${who?.name || "Spieler"} überspringen`);
+    skip.type = "button";
+    skip.addEventListener("click", () => {
+      const result = skipCurrent(state, Date.now());
+      if (result.effect === "ignore") return;
+      publishState(result.state);
+    });
+    parent.append(skip);
+  }
+}
+
+function finishPlayScreen() {
+  if (hostMissing() && state.started) renderWaitHost();
+  else if (state.needCategory) renderNeedCategory();
+  else if (state.paused) renderPause();
+  if (showingStandings) renderStandings(false);
+  armTimer();
+}
+
+function renderPlayGrid() {
   const view = el("section", "screen play");
   const body = el("div", "screen-body");
   const dock = el("div", "screen-dock");
@@ -938,105 +1098,61 @@ function renderPlay() {
   if (myTurn) body.append(el("p", "your-turn", "DU BIST DRAN!"));
   body.append(el("p", "who", who?.name || "Spieler"));
   body.append(el("p", "category", displayCategory(state)));
-  const hint = state.settings.endMode === "bombs" && state.settings.scoring === "bombs"
-    ? `Runde ${state.round} · bis ${state.settings.bombLimit} Bombenpunkte`
-    : `Runde ${state.round} von ${state.settings.rounds}`;
-  body.append(el("p", "round-hint", hint));
+  body.append(el("p", "round-hint", roundHintText()));
 
   const grid = el("div", "letters");
-  const active = enabledLetters(state.settings);
-  const lettersBlocked = !state.started || state.paused || state.needCategory || hostMissing();
-  const canTap = !lettersBlocked && (!isOnline() || isMyTurn());
-  for (const letter of active) {
-    const locked = (state.locked || []).includes(letter);
-    const watch = isOnline() && !isMyTurn() && !locked;
-    const button = el("button", `letter${locked ? " is-locked" : ""}${watch ? " is-watch" : ""}`, letter);
-    button.type = "button";
-    button.disabled = locked || !canTap;
-    button.addEventListener("click", () => onLetter(letter));
-    grid.append(button);
-  }
+  for (const button of letterButtons()) grid.append(button);
   body.append(grid);
-
-  const hostControls = !isOnline() || iAmHost();
-  if (!state.started) {
-    let freeField = null;
-    if (isFreeMode(state.settings) && hostControls) {
-      freeField = appendFreeCategoryForm(dock, {
-        title: "Sprecht eine Kategorie ab",
-      });
-    } else if (isFreeMode(state.settings)) {
-      dock.append(el("p", "lead", "Der Host legt die Kategorie fest."));
-    }
-    if (hostControls) {
-      const start = el("button", "btn primary", "Start");
-      start.type = "button";
-      start.addEventListener("click", () => {
-        if (isFreeMode(state.settings)) {
-          const typed = freeField ? freeField.value : freeDraft;
-          rememberFreeCategory(typed);
-          state = setFreeCategory(state, typed);
-          freeDraft = "";
-        }
-        publishState(startTurn(state, Date.now()));
-        unlock();
-      });
-      dock.append(start);
-      if (!isFreeMode(state.settings)) {
-        const other = el("button", "btn", "Andere Kategorie");
-        other.type = "button";
-        other.addEventListener("click", () => {
-          publishState(otherCategory(state, allCategories()));
-        });
-        dock.append(other);
-      }
-    } else {
-      dock.append(el("p", "lead", "Warten auf den Host …"));
-    }
-  } else if (!state.needCategory) {
-    if (hostControls) {
-      const invalid = el("button", "btn", "Ungültig");
-      invalid.type = "button";
-      invalid.disabled = state.paused;
-      invalid.addEventListener("click", () => {
-        const late = checkDeadline(state, Date.now());
-        if (late.effect === "boom") {
-          burst(late);
-          return;
-        }
-        const rejected = rejectTerm(state);
-        if (rejected.effect !== "boom") return;
-        burst(rejected);
-      });
-      const pauseBtn = el("button", "btn", "Pause");
-      pauseBtn.type = "button";
-      pauseBtn.disabled = state.paused;
-      pauseBtn.addEventListener("click", () => {
-        publishState(pause(state));
-      });
-      const row = el("div", "btn-row");
-      row.append(invalid, pauseBtn);
-      dock.append(row);
-      if (isOnline() && !currentSeatOnline() && !state.paused) {
-        const skip = el("button", "btn", `${who?.name || "Spieler"} überspringen`);
-        skip.type = "button";
-        skip.addEventListener("click", () => {
-          const result = skipCurrent(state, Date.now());
-          if (result.effect === "ignore") return;
-          publishState(result.state);
-        });
-        dock.append(skip);
-      }
-    }
-  }
-
+  appendPlayActions(dock);
   view.append(body, dock);
   app.replaceChildren(view);
-  if (hostMissing() && state.started) renderWaitHost();
-  else if (state.needCategory) renderNeedCategory();
-  else if (state.paused) renderPause();
-  if (showingStandings) renderStandings(false);
-  armTimer();
+  finishPlayScreen();
+}
+
+function renderPlayRing() {
+  setRingLock(true);
+  const view = el("section", "screen play play-ring");
+  const stage = el("div", "ring-stage");
+  const letters = letterButtons();
+  for (const button of letters) stage.append(button);
+
+  const center = el("div", "ring-center");
+  const cat = displayCategory(state);
+  center.append(el("p", "category", cat));
+  const who = state.players[state.current];
+  center.append(el("p", "who", who?.name || "Spieler"));
+  center.append(el("p", "round-hint", roundHintText()));
+
+  const actions = el("div", "ring-actions");
+  const top = el("div", "btn-row");
+  top.append(backLink());
+  const standingsBtn = el("button", "btn", "Stand");
+  standingsBtn.type = "button";
+  standingsBtn.addEventListener("click", () => {
+    showingStandings = true;
+    render();
+  });
+  const fresh = el("button", "btn", "Neues Spiel");
+  fresh.type = "button";
+  fresh.addEventListener("click", askNewGame);
+  top.append(standingsBtn, fresh);
+  actions.append(top);
+  appendPlayActions(actions);
+  center.append(actions);
+  center.append(el("p", "category is-flip", cat));
+  stage.append(center);
+  view.append(stage);
+  app.replaceChildren(view);
+  bindRingLayout(stage, letters, center);
+  finishPlayScreen();
+}
+
+function renderPlay() {
+  if (useLetterRing()) renderPlayRing();
+  else {
+    stopRingLayout();
+    renderPlayGrid();
+  }
 }
 
 function renderWaitHost() {
@@ -1214,6 +1330,7 @@ function renderResume() {
 function render() {
   preserveScreenScroll(app, () => {
     document.body.classList.toggle("is-play", Boolean(state && state.phase === "play"));
+    if (!(state && state.phase === "play" && useLetterRing())) stopRingLayout();
     if (unsubBadge && (step !== "play" || state?.phase !== "play")) {
       unsubBadge();
       unsubBadge = null;

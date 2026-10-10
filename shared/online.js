@@ -292,7 +292,7 @@ async function doInit() {
     );
   }
 
-  return { uid, restored: await restoreSession() };
+  return { uid };
 }
 
 export function initOnline() {
@@ -305,7 +305,7 @@ export function initOnline() {
   return initPromise;
 }
 
-async function restoreSession() {
+export async function restoreSession() {
   const session = getSession();
   if (!session?.code) return false;
   try {

@@ -31,6 +31,7 @@ export function defaultSettings() {
     letters: defaultLetters(),
     tick: true,
     categoryMode: "list",
+    layout: "ring",
   };
 }
 
@@ -43,13 +44,14 @@ export function normalizeSettings(raw) {
   const rounds = ROUND_OPTIONS.includes(raw.rounds) ? raw.rounds : 10;
   const bombLimit = BOMB_OPTIONS.includes(raw.bombLimit) ? raw.bombLimit : 5;
   const categoryMode = raw.categoryMode === "free" ? "free" : "list";
+  const layout = raw.layout === "grid" ? "grid" : "ring";
   const letters = defaultLetters();
   if (raw.letters && typeof raw.letters === "object") {
     for (const letter of ABC) {
       if (typeof raw.letters[letter] === "boolean") letters[letter] = raw.letters[letter];
     }
   }
-  return { timer, scoring, endMode, rounds, bombLimit, letters, tick: raw.tick !== false, categoryMode };
+  return { timer, scoring, endMode, rounds, bombLimit, letters, tick: raw.tick !== false, categoryMode, layout };
 }
 
 export function isFreeMode(settings) {
