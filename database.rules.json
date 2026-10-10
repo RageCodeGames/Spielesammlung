@@ -30,6 +30,15 @@
           }
         }
       }
+    },
+    "roomSecrets": {
+      "$code": {
+        ".read": "auth != null && root.child('rooms/' + $code + '/meta/hostId').val() === auth.uid",
+        ".write": "auth != null && ($code.matches(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}$/)) && (root.child('rooms/' + $code + '/meta/hostId').val() === auth.uid || (!root.child('rooms/' + $code).exists() && !newData.exists()))",
+        "$uid": {
+          ".read": "auth != null && (auth.uid === $uid || root.child('rooms/' + $code + '/meta/hostId').val() === auth.uid)"
+        }
+      }
     }
   }
 }

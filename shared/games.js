@@ -32,4 +32,12 @@ export const games = [
     href: "./games/schiffe/index.html",
     available: true,
   },
+  {
+    id: "tempel",
+    name: "Tempelgold",
+    description: "Bluff und Deduktion im Tempel.",
+    emoji: "🏛️",
+    href: "./games/tempel/index.html",
+    available: true,
+  },
 ];

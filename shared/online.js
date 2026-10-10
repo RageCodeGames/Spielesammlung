@@ -39,12 +39,15 @@ let disconnectOp = null;
 let unsubRoom = null;
 let unsubActions = null;
 let unsubInfo = null;
+let unsubSecrets = null;
 let lastSnapshot = null;
+let lastSecrets = null;
 const pendingActions = [];
 
 const roomListeners = new Set();
 const actionListeners = new Set();
 const connectionListeners = new Set();
+const secretListeners = new Set();
 
 function rememberPlayerId(id) {
   uid = id;
@@ -210,6 +213,7 @@ function mapRoom(code, data) {
       joinedAt: player?.joinedAt || 0,
       isHost: id === data.meta.hostId,
       isSelf: id === uid,
+      dummy: player?.dummy === true || String(id).startsWith("sim-"),
     }))
     .sort((a, b) => a.seat - b.seat || a.joinedAt - b.joinedAt);
   return {
@@ -365,6 +369,46 @@ async function attachPresence() {
   await fbSet(onlineRef, true);
 }
 
+function emitSecrets(payload) {
+  lastSecrets = payload;
+  for (const cb of secretListeners) {
+    try {
+      cb(payload);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+}
+
+function detachSecretListener() {
+  if (unsubSecrets) {
+    unsubSecrets();
+    unsubSecrets = null;
+  }
+}
+
+function listenToSecrets(code) {
+  detachSecretListener();
+  if (!fb?.dbMod || !db || !uid || !code) return;
+  const { ref, onValue } = fb.dbMod;
+  const asHost = uid === hostId;
+  const path = asHost ? `roomSecrets/${code}` : `roomSecrets/${code}/${uid}`;
+  unsubSecrets = onValue(
+    ref(db, path),
+    (snap) => {
+      if (asHost) {
+        const all = snap.exists() && typeof snap.val() === "object" && !Array.isArray(snap.val()) ? snap.val() : {};
+        emitSecrets({ mine: all[uid] || null, all });
+      } else {
+        emitSecrets({ mine: snap.val() || null, all: null });
+      }
+    },
+    (err) => {
+      console.error("[online] Geheime Daten", err);
+    }
+  );
+}
+
 function detachRoomListeners() {
   if (unsubRoom) {
     unsubRoom();
@@ -374,6 +418,7 @@ function detachRoomListeners() {
     unsubActions();
     unsubActions = null;
   }
+  detachSecretListener();
   pendingActions.length = 0;
 }
 
@@ -397,7 +442,9 @@ function listenToRoom(code) {
       return;
     }
     const snapshot = mapRoom(code, snap.val());
+    const hostChanged = hostId !== snapshot.hostId;
     hostId = snapshot.hostId;
+    if (hostChanged || !unsubSecrets) listenToSecrets(code);
     if (uid && !snapshot.players.some((p) => p.isSelf)) {
       emitRoom({ ...snapshot, status: "kicked" });
       leaveRoom({ kicked: true }).catch(() => {});
@@ -506,6 +553,7 @@ async function createRoomInner(newGameId, hostName, settings = {}) {
   hostId = uid;
   saveSession(code, name, id);
   listenToRoom(code);
+  listenToSecrets(code);
   await attachPresence();
   return code;
 }
@@ -543,6 +591,7 @@ export async function joinRoom(code, name, options = {}) {
     hostId = meta.hostId || null;
     saveSession(normalized, playerName, gameId);
     listenToRoom(normalized);
+    listenToSecrets(normalized);
     return normalized;
   } catch (err) {
     rethrow(err);
@@ -569,6 +618,7 @@ export async function leaveRoom(options = {}) {
     const { ref, remove } = fb.dbMod;
     try {
       if (wasHost) {
+        await remove(ref(db, `roomSecrets/${code}`));
         await remove(ref(db, `rooms/${code}`));
         await remove(ref(db, `roomIndex/${code}`));
       } else {
@@ -583,6 +633,7 @@ export async function leaveRoom(options = {}) {
   gameId = null;
   hostId = null;
   lastSnapshot = null;
+  lastSecrets = null;
   if (!switching) clearSession();
 }
 
@@ -605,6 +656,65 @@ export function onConnectionChange(callback) {
   connectionListeners.add(callback);
   callback(connected);
   return () => connectionListeners.delete(callback);
+}
+
+/**
+ * Geheime Daten: Mitspieler hören nur den eigenen Pfad, der Host alle.
+ * callback({ mine, all }) – all ist nur beim Host gesetzt.
+ */
+export function onSecrets(callback) {
+  secretListeners.add(callback);
+  if (lastSecrets !== null) callback(lastSecrets);
+  return () => secretListeners.delete(callback);
+}
+
+export async function writeAllSecrets(map) {
+  try {
+    await initOnline();
+    if (!roomCode) fail("no-room", "Kein Raum.");
+    if (!isHost()) fail("not-host", "Nur der Host schreibt geheime Daten.");
+    const { ref, set: fbSet } = fb.dbMod;
+    await fbSet(ref(db, `roomSecrets/${roomCode}`), jsonSafe(map && typeof map === "object" ? map : {}));
+  } catch (err) {
+    rethrow(err);
+  }
+}
+
+export async function writePlayerSecret(playerId, data) {
+  try {
+    await initOnline();
+    if (!roomCode) fail("no-room", "Kein Raum.");
+    if (!isHost()) fail("not-host", "Nur der Host schreibt geheime Daten.");
+    if (!playerId) fail("bad-player", "Kein Spieler.");
+    const { ref, set: fbSet } = fb.dbMod;
+    await fbSet(ref(db, `roomSecrets/${roomCode}/${playerId}`), jsonSafe(data ?? null));
+  } catch (err) {
+    rethrow(err);
+  }
+}
+
+export async function addDummyPlayer(displayName) {
+  try {
+    await initOnline();
+    if (!roomCode) fail("no-room", "Kein Raum.");
+    if (!isHost()) fail("not-host", "Nur der Host kann Testspieler anlegen.");
+    const { ref, get: fbGet, set: fbSet } = fb.dbMod;
+    const snap = await fbGet(ref(db, `rooms/${roomCode}/players`));
+    const players = snap.exists() && typeof snap.val() === "object" ? snap.val() : {};
+    const seats = Object.values(players).map((row) => Number(row?.seat) || 0);
+    const seat = seats.length ? Math.max(...seats) + 1 : 0;
+    const id = `sim-${randomCode()}${randomCode()}`.slice(0, 16);
+    await fbSet(ref(db, `rooms/${roomCode}/players/${id}`), {
+      name: normalizeName(displayName),
+      online: true,
+      seat,
+      joinedAt: Date.now(),
+      dummy: true,
+    });
+    return id;
+  } catch (err) {
+    rethrow(err);
+  }
 }
 
 export async function setState(state) {
@@ -666,6 +776,11 @@ export async function kickPlayer(playerId) {
     if (!playerId || playerId === uid) return;
     const { ref, remove } = fb.dbMod;
     await remove(ref(db, `rooms/${roomCode}/players/${playerId}`));
+    try {
+      await remove(ref(db, `roomSecrets/${roomCode}/${playerId}`));
+    } catch {
+      /* noch keine Geheimnisse */
+    }
   } catch (err) {
     rethrow(err);
   }

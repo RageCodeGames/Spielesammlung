@@ -1,0 +1,358 @@
+body.tempel {
+  --bg: #1c1410;
+  --bg-glow: #5a3a1c;
+  --surface: #3a2a1c;
+  --surface-hover: #4a3624;
+  --text: #f4efe6;
+  --muted: #c4b49a;
+  --accent: #e6c15a;
+  --accent-ink: #2a1c08;
+  --temple-fire: #e25a2a;
+  --temple-moss: #4a7a58;
+}
+
+body.tempel {
+  background:
+    radial-gradient(120% 55% at 50% -10%, var(--bg-glow) 0%, transparent 58%),
+    var(--bg);
+}
+
+.tempel-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 1rem;
+  background: #2a1c14;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.tempel-stats span {
+  color: var(--muted);
+}
+
+.tempel-stats strong {
+  color: var(--text);
+}
+
+.tempel-banner {
+  margin: 0;
+  padding: 0.7rem 0.85rem;
+  border-radius: 0.9rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 800;
+  text-align: center;
+  line-height: 1.3;
+}
+
+.tempel-banner.wait {
+  background: #3a2a1c;
+  color: var(--text);
+  border: 2px solid #8a6a32;
+}
+
+.own-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.75rem;
+  border-radius: 1rem;
+  background: var(--surface);
+}
+
+.own-panel h2 {
+  font-size: 1rem;
+}
+
+.counts {
+  display: flex;
+  gap: 0.45rem;
+}
+
+.count {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.4rem 0.2rem;
+  border-radius: 0.7rem;
+  background: #2a1c14;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.count img {
+  width: 2.2rem;
+  height: 2.75rem;
+}
+
+.count strong {
+  color: var(--text);
+  font-size: 1.15rem;
+}
+
+.role-peek {
+  position: relative;
+  width: 100%;
+  min-height: 52px;
+  border: 0;
+  border-radius: 0.8rem;
+  background: #2a1c14;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.role-peek .hint {
+  display: block;
+  padding: 0.7rem 0.8rem;
+}
+
+.role-peek .face {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  padding: 0.45rem 0.7rem;
+}
+
+.role-peek.is-open .hint {
+  display: none;
+}
+
+.role-peek.is-open .face {
+  display: flex;
+}
+
+.role-peek img {
+  width: 2.4rem;
+  height: 3rem;
+}
+
+.role-peek strong {
+  color: var(--accent);
+  font-size: 1.15rem;
+}
+
+.claim-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.95rem;
+}
+
+.claim-line .btn {
+  min-height: 40px;
+  padding: 0.35rem 0.75rem;
+  width: auto;
+}
+
+.player-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.7rem;
+  border-radius: 1rem;
+  background: var(--surface);
+}
+
+.player-card.is-self {
+  box-shadow: inset 0 0 0 2px rgba(230, 193, 90, 0.35);
+}
+
+.player-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.player-head .name {
+  font-weight: 800;
+  flex: 1;
+  min-width: 0;
+}
+
+.player-head .claim {
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.key-mark {
+  width: 1.4rem;
+  height: 1.4rem;
+  flex: 0 0 auto;
+  background: var(--accent);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M12 2a5 5 0 00-1 9.9V14H9v2h2v2h2v-4.1A5 5 0 0012 2zm0 2a3 3 0 110 6 3 3 0 010-6zm-1 3h2v2h-2z'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='black' d='M12 2a5 5 0 00-1 9.9V14H9v2h2v2h2v-4.1A5 5 0 0012 2zm0 2a3 3 0 110 6 3 3 0 010-6zm-1 3h2v2h-2z'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+.chamber-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.chamber {
+  width: 3.05rem;
+  height: 3.85rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.45rem;
+  background: transparent;
+  overflow: hidden;
+  cursor: default;
+}
+
+.chamber img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.chamber.is-open {
+  cursor: pointer;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.chamber.is-flip {
+  animation: chamber-flip 0.7s ease;
+}
+
+@keyframes chamber-flip {
+  0% {
+    transform: rotateY(88deg) scale(0.86);
+    filter: brightness(2);
+  }
+  100% {
+    transform: none;
+    filter: none;
+  }
+}
+
+.log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.log-list li {
+  padding: 0.35rem 0.55rem;
+  border-radius: 0.55rem;
+  background: #2a1c14;
+}
+
+.dialog-back {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(12, 8, 4, 0.88);
+}
+
+.dialog {
+  width: min(100%, 24rem);
+  max-height: min(90dvh, 36rem);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  border-radius: 1.1rem;
+  background: #2a1c14;
+  box-shadow: var(--shadow);
+}
+
+.dialog h2 {
+  font-size: 1.25rem;
+}
+
+.dialog p {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.step-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.step-row span {
+  flex: 1;
+  font-weight: 700;
+}
+
+.step-row strong {
+  min-width: 1.6rem;
+  text-align: center;
+}
+
+.step-row .btn {
+  width: 2.6rem;
+  min-height: 2.6rem;
+  padding: 0;
+}
+
+.end-roles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.end-role {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.45rem 0.6rem;
+  border-radius: 0.8rem;
+  background: var(--surface);
+}
+
+.end-role img {
+  width: 2.2rem;
+  height: 2.75rem;
+}
+
+.toast {
+  position: fixed;
+  z-index: 40;
+  left: 50%;
+  bottom: calc(5.5rem + var(--safe-bottom));
+  transform: translateX(-50%);
+  padding: 0.55rem 0.9rem;
+  border-radius: 999px;
+  background: #2a1c14;
+  box-shadow: var(--shadow);
+  font-weight: 700;
+}
+
+.lobby-extra {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chamber.is-flip {
+    animation: none;
+  }
+}

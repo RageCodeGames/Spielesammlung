@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#1c1410">
+  <meta name="description" content="Tempelgold – Bluff und Deduktion, mehrere Handys.">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Kajütenspiele">
+  <title>Tempelgold – Kajütenspiele</title>
+  <script>
+    (function () {
+      var path = location.pathname;
+      var dir = path.endsWith("/")
+        ? path
+        : path.slice(path.lastIndexOf("/") + 1).indexOf(".") >= 0
+          ? path.slice(0, path.lastIndexOf("/") + 1)
+          : path + "/";
+      var base = document.createElement("base");
+      base.href = dir;
+      document.head.appendChild(base);
+    })();
+  </script>
+  <link rel="icon" href="../../icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="../../icons/apple-touch-icon.png">
+  <link rel="manifest" href="../../manifest.json">
+  <link rel="stylesheet" href="../../shared/styles.css">
+  <link rel="stylesheet" href="./game.css">
+</head>
+<body class="page tempel">
+  <div id="app"></div>
+  <script type="module" src="./ui.js"></script>
+</body>
+</html>

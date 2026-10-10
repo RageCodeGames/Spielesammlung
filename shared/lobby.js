@@ -570,6 +570,12 @@ export function mountLobby(root, options = {}) {
     }
     body.append(list);
 
+    if (options.renderRoomExtra) {
+      const extra = el("div", "lobby-extra");
+      body.append(extra);
+      options.renderRoomExtra(extra, { room, isHost: host });
+    }
+
     appendHint();
 
     if (room.status === "kicked") {

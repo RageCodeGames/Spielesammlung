@@ -318,6 +318,7 @@ body.online-test #app {
 /* Spiel-Root ohne Dock (Kampf, Platzieren): unterer Abstand am Inhalt. */
 body.schiffe #app:not(:has(> .screen)),
 body.tapper #app:not(:has(> .screen)),
+body.tempel #app:not(:has(> .screen)),
 body.online-test #app:not(:has(> .screen)) {
   padding-bottom: var(--dock-bottom);
 }
