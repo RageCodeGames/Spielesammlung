@@ -12,18 +12,26 @@ const API_URL = "https://api.spotify.com/v1";
 const SCOPES = "user-read-playback-state user-modify-playback-state";
 const TOKEN_KEY = "kajuete:spotify-tokens";
 const PKCE_KEY = "kajuete:spotify-pkce";
+const DEVICE_KEY = "kajuete:spotify-device";
 const REFRESH_MARGIN_MS = 60_000;
+const TRANSFER_WAIT_MS = 600;
+const DIAGNOSE_MAX = 40;
 
 export class SpotifyError extends Error {
-  constructor(code, message, status = 0) {
+  constructor(code, message, status = 0, extras = {}) {
     super(message);
     this.name = "SpotifyError";
     this.code = code;
     this.status = status;
+    this.reason = extras.reason || "";
+    this.detail = extras.detail || "";
+    this.path = extras.path || "";
   }
 }
 
 let refreshWait = null;
+const diagnoseListeners = new Set();
+const diagnoseLog = [];
 
 export function isConfigured() {
   return Boolean(SPOTIFY_CLIENT_ID && SPOTIFY_CLIENT_ID !== "HIER EINFÜGEN");
@@ -42,6 +50,14 @@ export function getStoredSession() {
     userId: tokens.userId || "",
     expiresAt: Number(tokens.expiresAt) || 0,
   };
+}
+
+export function getPreferredDeviceId() {
+  return String(get(DEVICE_KEY, "") || "");
+}
+
+export function setPreferredDeviceId(id) {
+  set(DEVICE_KEY, id ? String(id) : null);
 }
 
 export function parseTrackUri(input) {
@@ -66,6 +82,54 @@ export function explainError(err) {
   return err?.message || "Etwas ist schiefgelaufen.";
 }
 
+/** Sichtbare Diagnose-Zeilen (neueste zuerst). */
+export function getDiagnoseLog() {
+  return diagnoseLog.slice();
+}
+
+export function clearDiagnoseLog() {
+  diagnoseLog.length = 0;
+  for (const cb of diagnoseListeners) {
+    try {
+      cb(diagnoseLog.slice());
+    } catch (err) {
+      console.error(err);
+    }
+  }
+}
+
+export function onDiagnose(callback) {
+  diagnoseListeners.add(callback);
+  callback(diagnoseLog.slice());
+  return () => diagnoseListeners.delete(callback);
+}
+
+function pushDiagnose(entry) {
+  const row = {
+    at: Date.now(),
+    ...entry,
+  };
+  diagnoseLog.unshift(row);
+  if (diagnoseLog.length > DIAGNOSE_MAX) diagnoseLog.length = DIAGNOSE_MAX;
+  console.info("[spotify]", row.method || "", row.path || "", row.status, row.reason || row.message || "");
+  for (const cb of diagnoseListeners) {
+    try {
+      cb(diagnoseLog.slice());
+    } catch (err) {
+      console.error(err);
+    }
+  }
+}
+
+export function formatDiagnoseLine(row) {
+  const time = new Date(row.at).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const parts = [`${time} ${row.method || ""} ${row.path || ""} → HTTP ${row.status ?? "–"}`];
+  if (row.reason) parts.push(`reason=${row.reason}`);
+  if (row.message) parts.push(row.message);
+  if (row.detail && row.detail !== row.message) parts.push(row.detail);
+  return parts.join(" · ");
+}
+
 export async function login() {
   if (!isConfigured()) {
     throw new SpotifyError(
@@ -85,12 +149,14 @@ export async function login() {
   url.searchParams.set("code_challenge", challenge);
   url.searchParams.set("state", state);
   url.searchParams.set("scope", SCOPES);
+  pushDiagnose({ method: "GET", path: "/authorize", status: "redirect", message: "Anmeldung starten" });
   location.assign(url.toString());
 }
 
 export function logout() {
   set(TOKEN_KEY, null);
   set(PKCE_KEY, null);
+  pushDiagnose({ method: "local", path: "logout", status: "ok", message: "Abgemeldet" });
 }
 
 /**
@@ -108,6 +174,7 @@ export async function completeLoginIfRedirected() {
   clearAuthParams();
   if (error) {
     set(PKCE_KEY, null);
+    pushDiagnose({ method: "GET", path: "/callback", status: "error", reason: error, message: authErrorMessage(error) });
     throw new SpotifyError("auth-denied", authErrorMessage(error));
   }
   if (!pkce?.verifier) {
@@ -143,28 +210,63 @@ export async function getDevices() {
   }));
 }
 
+/** Wiedergabe auf ein Gerät legen, ohne abzuspielen. */
+export async function transferPlayback(deviceId, shouldPlay = false) {
+  if (!deviceId) throw new SpotifyError("no-device", "Kein Gerät gewählt.");
+  await api("PUT", "/me/player", {
+    device_ids: [deviceId],
+    play: shouldPlay === true,
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+/**
+ * Song starten: zuerst Transfer auf das Gerät, kurz warten, dann Play.
+ * Bei Fehler einmal Transfer + Play wiederholen.
+ */
 export async function play(trackUri, deviceId, startMs = 0) {
   const uri = parseTrackUri(trackUri) || trackUri;
   if (!uri || !uri.startsWith("spotify:track:")) {
     throw new SpotifyError("bad-track", "Das ist kein gültiger Spotify-Song-Link.");
   }
+  if (!deviceId) {
+    throw new SpotifyError(
+      "no-device",
+      "Kein aktives Gerät gefunden. Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren."
+    );
+  }
   const position = Math.max(0, Math.floor(Number(startMs) || 0));
-  const query = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : "";
-  try {
-    await api("PUT", `/me/player/play${query}`, {
-      uris: [uri],
-      position_ms: position,
+  const body = { uris: [uri], position_ms: position };
+  const playPath = `/me/player/play?device_id=${encodeURIComponent(deviceId)}`;
+
+  async function attempt(label) {
+    pushDiagnose({
+      method: "PUT",
+      path: "/me/player (transfer)",
+      status: "…",
+      message: `${label}: Wiedergabe auf Gerät legen`,
+      detail: deviceId,
     });
+    await transferPlayback(deviceId, false);
+    await sleep(TRANSFER_WAIT_MS);
+    await api("PUT", playPath, body);
+  }
+
+  try {
+    await attempt("1/2");
   } catch (err) {
-    if (deviceId && (err?.code === "no-device" || err?.status === 404)) {
-      await api("PUT", "/me/player", { device_ids: [deviceId], play: false });
-      await api("PUT", `/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
-        uris: [uri],
-        position_ms: position,
-      });
-      return;
-    }
-    throw err;
+    pushDiagnose({
+      method: "retry",
+      path: playPath,
+      status: err?.status || "error",
+      reason: err?.reason || err?.code || "",
+      message: `Erster Play fehlgeschlagen – einmal wiederholen. ${explainError(err)}`,
+    });
+    await sleep(400);
+    await attempt("2/2");
   }
 }
 
@@ -173,7 +275,16 @@ export async function pause(deviceId) {
   try {
     await api("PUT", `/me/player/pause${query}`);
   } catch (err) {
-    if (err?.status === 404) return;
+    if (err?.status === 404) {
+      pushDiagnose({
+        method: "PUT",
+        path: `/me/player/pause${query}`,
+        status: 404,
+        reason: err.reason || "NO_ACTIVE_DEVICE",
+        message: "Pause: kein aktives Gerät (ignoriert)",
+      });
+      return;
+    }
     throw err;
   }
 }
@@ -186,18 +297,45 @@ async function api(method, path, body) {
     headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
   }
-  const response = await fetch(`${API_URL}${path}`, options);
-  if (response.status === 204 || response.status === 202) return null;
+  let response;
+  try {
+    response = await fetch(`${API_URL}${path}`, options);
+  } catch (err) {
+    console.error("[spotify] API", err);
+    pushDiagnose({ method, path, status: "network", message: "Keine Verbindung zu Spotify." });
+    throw new SpotifyError("network", "Keine Verbindung zu Spotify.", 0, { path });
+  }
+
   let data = null;
-  const text = await response.text();
-  if (text) {
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { raw: text };
+  let text = "";
+  if (response.status !== 204 && response.status !== 202) {
+    text = await response.text();
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { raw: text };
+      }
     }
   }
-  if (!response.ok) throw fromApiError(response.status, data);
+
+  const reason = String(data?.error?.reason || "");
+  const message = String(data?.error?.message || data?.error_description || "");
+  pushDiagnose({
+    method,
+    path,
+    status: response.status,
+    reason: reason || (response.ok ? "" : String(data?.error || "")),
+    message: response.ok
+      ? response.status === 204 || response.status === 202
+        ? "OK (kein Inhalt)"
+        : "OK"
+      : message || `Fehler ${response.status}`,
+    detail: text && text.length < 400 ? text : "",
+  });
+
+  if (response.status === 204 || response.status === 202) return null;
+  if (!response.ok) throw fromApiError(response.status, data, path);
   return data;
 }
 
@@ -224,6 +362,7 @@ export async function getAccessToken() {
 
 async function refreshTokens(refreshToken) {
   try {
+    pushDiagnose({ method: "POST", path: "/api/token", status: "…", message: "Token erneuern" });
     const tokens = await requestToken({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
@@ -258,9 +397,17 @@ async function requestToken(params) {
     });
   } catch (err) {
     console.error("[spotify] Token", err);
+    pushDiagnose({ method: "POST", path: "/api/token", status: "network", message: "Keine Verbindung zu Spotify." });
     throw new SpotifyError("network", "Keine Verbindung zu Spotify.");
   }
   const data = await response.json().catch(() => ({}));
+  pushDiagnose({
+    method: "POST",
+    path: "/api/token",
+    status: response.status,
+    reason: data?.error || "",
+    message: response.ok ? "Token OK" : String(data?.error_description || data?.error || `HTTP ${response.status}`),
+  });
   if (!response.ok) throw fromTokenError(response.status, data);
   if (!data.access_token) throw new SpotifyError("auth", "Spotify hat kein Zugriffstoken geliefert.");
   return data;
@@ -295,7 +442,14 @@ async function fetchMe(accessToken) {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw fromApiError(response.status, data);
+  pushDiagnose({
+    method: "GET",
+    path: "/me",
+    status: response.status,
+    reason: data?.error?.reason || "",
+    message: response.ok ? data?.display_name || data?.id || "Profil OK" : data?.error?.message || `HTTP ${response.status}`,
+  });
+  if (!response.ok) throw fromApiError(response.status, data, "/me");
   return data;
 }
 
@@ -309,7 +463,7 @@ function fromTokenError(status, data) {
       status
     );
   }
-  if (/invalid_client|invalid client/i.test(desc) || status === 400 && /client/i.test(lower)) {
+  if (/invalid_client|invalid client/i.test(desc) || (status === 400 && /client/i.test(lower))) {
     return new SpotifyError(
       "client",
       "Ungültige Client ID oder die App ist im Spotify Developer Dashboard nicht richtig eingerichtet.",
@@ -320,7 +474,8 @@ function fromTokenError(status, data) {
     return new SpotifyError(
       "allowlist",
       "Dieses Spotify-Konto ist im Developer Dashboard nicht freigeschaltet (User Management).",
-      status
+      status,
+      { reason: data?.error || "" }
     );
   }
   if (status === 401 || /invalid_grant|expired/i.test(lower)) {
@@ -329,34 +484,46 @@ function fromTokenError(status, data) {
   return new SpotifyError("auth", desc || "Anmeldung bei Spotify fehlgeschlagen.", status);
 }
 
-function fromApiError(status, data) {
+function fromApiError(status, data, path = "") {
   const reason = String(data?.error?.reason || "");
   const message = String(data?.error?.message || data?.error_description || data?.error || "");
   const blob = `${reason} ${message}`.toLowerCase();
+  const extras = { reason, detail: message, path };
+
   if (status === 401) {
-    return new SpotifyError("auth-expired", "Anmeldung abgelaufen. Bitte erneut mit Spotify anmelden.", status);
+    return new SpotifyError("auth-expired", "Anmeldung abgelaufen. Bitte erneut mit Spotify anmelden.", status, extras);
   }
-  if (status === 403 && (/premium/i.test(blob) || reason === "PREMIUM_REQUIRED")) {
-    return new SpotifyError("premium", "Spotify Premium ist nötig, um Songs per App zu starten.", status);
+  if (status === 403 && (reason === "PREMIUM_REQUIRED" || /premium/i.test(blob))) {
+    return new SpotifyError("premium", "Spotify Premium ist nötig, um Songs per App zu starten.", status, extras);
+  }
+  if (reason === "RESTRICTION_VIOLATED" || /restriction violated/i.test(blob)) {
+    return new SpotifyError(
+      "restriction",
+      "Spotify blockiert diesen Befehl (Restriction violated) – oft wegen freiem Konto, Gerät oder Region.",
+      status,
+      extras
+    );
   }
   if (/not registered|developer dashboard/i.test(blob)) {
     return new SpotifyError(
       "allowlist",
       "Dieses Spotify-Konto ist im Developer Dashboard nicht freigeschaltet (User Management).",
-      status
+      status,
+      extras
     );
   }
   if (status === 404 || reason === "NO_ACTIVE_DEVICE" || /no active device|no device/i.test(blob)) {
     return new SpotifyError(
       "no-device",
-      "Kein aktives Gerät gefunden. Öffne die Spotify-App, spiele kurz irgendeinen Song und tippe auf Aktualisieren.",
-      status
+      "Kein aktives Gerät (NO_ACTIVE_DEVICE). Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren.",
+      status,
+      extras
     );
   }
   if (status === 403) {
-    return new SpotifyError("forbidden", message || "Spotify hat den Befehl abgelehnt.", status);
+    return new SpotifyError("forbidden", message || "Spotify hat den Befehl abgelehnt.", status, extras);
   }
-  return new SpotifyError("api", message || `Spotify-Fehler (${status}).`, status);
+  return new SpotifyError("api", message || `Spotify-Fehler (${status}).`, status, extras);
 }
 
 function authErrorMessage(error) {

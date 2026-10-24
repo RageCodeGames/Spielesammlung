@@ -1,4 +1,5 @@
 import { mountLobby } from "../shared/lobby.js";
+import { isMuted, mountMuteButton } from "../shared/mute-button.js";
 import {
   isHost,
   leaveRoom,
@@ -9,31 +10,40 @@ import {
   setState,
 } from "../shared/online.js";
 import {
+  clearDiagnoseLog,
   completeLoginIfRedirected,
   explainError,
+  formatDiagnoseLine,
   getDevices,
+  getPreferredDeviceId,
   getStoredSession,
   isConfigured,
   login,
   logout,
+  onDiagnose,
   parseTrackUri,
   pause,
   play,
   redirectUri,
+  setPreferredDeviceId,
 } from "../shared/spotify.js";
 
 const app = document.getElementById("app");
+const NO_DEVICE_HINT =
+  "Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren.";
 
 let session = getStoredSession();
 let devices = [];
-let deviceId = "";
+let deviceId = getPreferredDeviceId();
 let clipSec = 30;
-let muted = false;
+let muted = isMuted();
 let lastCueSeq = 0;
 let countdownTimer = 0;
 let countdownUntil = 0;
 let lobby = null;
 let room = null;
+let muteControl = null;
+let unsubDiagnose = null;
 const unsubs = [];
 let bootError = "";
 
@@ -47,12 +57,17 @@ function el(tag, className, text) {
 function showError(node, err, context) {
   const message = explainError(err);
   console.error(`[spotify-test] ${context}`, err);
+  if (!node) return;
   node.hidden = false;
   node.className = "note is-bad";
-  node.textContent = message;
+  const bits = [message];
+  if (err?.status) bits.push(`HTTP ${err.status}`);
+  if (err?.reason) bits.push(err.reason);
+  node.textContent = bits.join(" · ");
 }
 
 function showNote(node, text, bad = false) {
+  if (!node) return;
   node.hidden = !text;
   node.className = bad ? "note is-bad" : "note";
   node.textContent = text || "";
@@ -71,6 +86,16 @@ function trackFromInput() {
   return parseTrackUri(input?.value || "");
 }
 
+function paintDiagnose(rows) {
+  const pre = app.querySelector("[data-diagnose]");
+  if (!pre) return;
+  if (!rows?.length) {
+    pre.textContent = "Noch keine Spotify-Aufrufe.";
+    return;
+  }
+  pre.textContent = rows.map(formatDiagnoseLine).join("\n");
+}
+
 function stopCountdown() {
   window.clearInterval(countdownTimer);
   countdownTimer = 0;
@@ -81,22 +106,33 @@ function stopCountdown() {
 
 function startCountdown(seconds) {
   stopCountdown();
+  const node = app.querySelector("[data-countdown]");
   if (!seconds) {
-    const node = app.querySelector("[data-countdown]");
     if (node) node.textContent = "Ganzer Song – kein automatisches Pause.";
     return;
   }
   countdownUntil = Date.now() + seconds * 1000;
+  let pausing = false;
   const tick = async () => {
     const left = Math.max(0, Math.ceil((countdownUntil - Date.now()) / 1000));
-    const node = app.querySelector("[data-countdown]");
-    if (node) node.textContent = left ? `Pause in ${left}s` : "Pausiert";
-    if (left > 0) return;
-    stopCountdown();
-    if (muted) return;
+    const label = app.querySelector("[data-countdown]");
+    if (label) label.textContent = left ? `Pause in ${left}s` : "Pausiere …";
+    if (left > 0 || pausing) return;
+    pausing = true;
+    window.clearInterval(countdownTimer);
+    countdownTimer = 0;
+    if (muted) {
+      if (label) label.textContent = "Stumm – kein Pause nötig";
+      return;
+    }
+    const id = selectedDeviceId();
     try {
-      await pause(selectedDeviceId());
+      await pause(id);
+      if (label) label.textContent = "Pausiert";
+      const hint = app.querySelector("[data-local-hint]");
+      showNote(hint, "Automatisch pausiert (30 Sekunden).");
     } catch (err) {
+      if (label) label.textContent = "Pause fehlgeschlagen";
       const hint = app.querySelector("[data-local-hint]");
       if (hint) showError(hint, err, "Pause");
     }
@@ -105,7 +141,20 @@ function startCountdown(seconds) {
   tick();
 }
 
+async function pauseHere() {
+  stopCountdown();
+  const id = selectedDeviceId();
+  if (!id) return;
+  try {
+    await pause(id);
+  } catch (err) {
+    const hint = app.querySelector("[data-local-hint]");
+    if (hint) showError(hint, err, "Stumm-Pause");
+  }
+}
+
 async function playHere(trackUri, startMs, clip, sentAt) {
+  muted = isMuted();
   const lagNode = app.querySelector("[data-lag]");
   const hint = app.querySelector("[data-local-hint]");
   if (muted) {
@@ -116,11 +165,7 @@ async function playHere(trackUri, startMs, clip, sentAt) {
   }
   const id = selectedDeviceId();
   if (!id) {
-    showNote(
-      hint,
-      "Kein aktives Gerät gefunden. Öffne die Spotify-App, spiele kurz irgendeinen Song ab und tippe auf Aktualisieren.",
-      true
-    );
+    showNote(hint, NO_DEVICE_HINT, true);
     if (lagNode) lagNode.textContent = "";
     return;
   }
@@ -143,20 +188,18 @@ async function refreshDevices() {
   if (!session) return;
   try {
     devices = await getDevices();
-    if (deviceId && !devices.some((row) => row.id === deviceId)) deviceId = "";
-    if (!deviceId) {
+    const preferred = getPreferredDeviceId();
+    if (preferred && devices.some((row) => row.id === preferred)) {
+      deviceId = preferred;
+    } else if (deviceId && devices.some((row) => row.id === deviceId)) {
+      /* aktuelle Auswahl behalten */
+    } else {
       deviceId = devices.find((row) => row.active)?.id || devices[0]?.id || "";
     }
+    if (deviceId) setPreferredDeviceId(deviceId);
     paintDevices(box);
-    if (!devices.length) {
-      showNote(
-        hint,
-        "Öffne die Spotify-App, spiele kurz irgendeinen Song ab und tippe auf Aktualisieren.",
-        true
-      );
-    } else {
-      showNote(hint, "");
-    }
+    if (!devices.length) showNote(hint, NO_DEVICE_HINT, true);
+    else showNote(hint, "");
   } catch (err) {
     devices = [];
     paintDevices(box);
@@ -179,9 +222,13 @@ function paintDevices(box) {
     radio.value = device.id;
     radio.checked = device.id === deviceId;
     radio.addEventListener("change", () => {
-      if (radio.checked) deviceId = device.id;
+      if (!radio.checked) return;
+      deviceId = device.id;
+      setPreferredDeviceId(device.id);
     });
-    const meta = [device.type, device.active ? "aktiv" : ""].filter(Boolean).join(" · ");
+    const meta = [device.type, device.active ? "aktiv" : "", device.restricted ? "eingeschränkt" : ""]
+      .filter(Boolean)
+      .join(" · ");
     row.append(radio, el("span", "", `${device.name}${meta ? ` (${meta})` : ""}`));
     box.append(row);
   }
@@ -214,6 +261,19 @@ async function playAll() {
   } catch (err) {
     showError(hint, err, "An alle senden");
   }
+}
+
+function appendDiagnose(parent) {
+  parent.append(el("h2", "lobby-list-title", "Diagnose"));
+  const tools = el("div", "btn-row");
+  const clear = el("button", "btn", "Diagnose leeren");
+  clear.type = "button";
+  clear.addEventListener("click", () => clearDiagnoseLog());
+  tools.append(clear);
+  parent.append(tools);
+  const pre = el("pre", "play-log spotify-diagnose");
+  pre.setAttribute("data-diagnose", "1");
+  parent.append(pre);
 }
 
 function showLobby() {
@@ -251,24 +311,20 @@ function showRoomPlay(initial) {
   room = initial;
   lastCueSeq = 0;
   slot.innerHTML = "";
-  slot.classList.add("lobby");
-  const screen = el("div", "screen");
-  const body = el("div", "screen-body");
-  const dock = el("div", "screen-dock");
-  screen.append(body, dock);
-  slot.append(screen);
+  slot.classList.add("spotify-online-flat");
 
+  const panel = el("div", "spotify-online-panel");
   const top = el("div", "lobby-top");
   top.append(el("p", "lobby-kicker", "Mehrere Handys"));
   const badge = el("div");
   unsubs.push(mountConnectionBadge(badge));
   top.append(badge);
-  body.append(top);
-  body.append(el("h2", "", "Gemeinsam abspielen"));
+  panel.append(top);
+  panel.append(el("h2", "", "Gemeinsam abspielen"));
   const status = el("p", "lead");
   const list = el("ul", "lobby-players");
-  body.append(status, list);
-  body.append(
+  panel.append(status, list);
+  panel.append(
     el(
       "p",
       "note",
@@ -276,6 +332,7 @@ function showRoomPlay(initial) {
     )
   );
 
+  const actions = el("div", "btn-row");
   if (isHost()) {
     const all = el("button", "btn primary", "Für alle abspielen");
     all.type = "button";
@@ -287,11 +344,10 @@ function showRoomPlay(initial) {
         all.disabled = false;
       }
     });
-    dock.append(all);
+    actions.append(all);
   } else {
-    body.append(el("p", "lead", "Warten auf den Host …"));
+    panel.append(el("p", "lead", "Warten auf den Host …"));
   }
-
   const back = el("button", "btn", "Zurück zur Lobby");
   back.type = "button";
   back.addEventListener("click", async () => {
@@ -302,7 +358,9 @@ function showRoomPlay(initial) {
     }
     showLobby();
   });
-  dock.append(back);
+  actions.append(back);
+  panel.append(actions);
+  slot.append(panel);
 
   function paint(next) {
     if (!next) {
@@ -329,12 +387,7 @@ function showRoomPlay(initial) {
   }
 
   paint(initial);
-
-  unsubs.push(
-    onRoomChange((next) => {
-      paint(next);
-    })
-  );
+  unsubs.push(onRoomChange((next) => paint(next)));
   unsubs.push(
     onAction((action) => {
       if (action.type === "play-all") handleCue(action.payload);
@@ -344,34 +397,44 @@ function showRoomPlay(initial) {
 
 function render() {
   const keepTrack = app.querySelector("[name=track]")?.value || "";
-  const keepMuted = muted;
   const keepClip = clipSec;
   lobby?.destroy();
   lobby = null;
+  muteControl?.destroy();
+  muteControl = null;
   clearUnsubs();
   room = null;
   app.innerHTML = "";
-  const screen = el("div", "screen");
+
+  const screen = el("div", "screen spotify-page");
   const body = el("div", "screen-body");
   const dock = el("div", "screen-dock");
   screen.append(body, dock);
   app.append(screen);
 
-  body.append(el("p", "lobby-kicker", "Techniktest"));
+  const top = el("div", "lobby-top");
+  top.append(el("p", "lobby-kicker", "Techniktest"));
+  const tools = el("div", "lobby-top-tools");
+  muteControl = mountMuteButton(tools, {
+    onChange(next) {
+      muted = next;
+    },
+    onMute: pauseHere,
+  });
+  muted = isMuted();
+  top.append(tools);
+  body.append(top);
+
   body.append(el("h1", "", "Spotify"));
   body.append(
     el("p", "lead", "Prüfen, ob Songs auf dem Handy starten und stoppen – auch auf mehreren Geräten.")
   );
-  const uriNote = el("p", "note spotify-uri", `Redirect-URI: ${redirectUri()}`);
-  body.append(uriNote);
+  body.append(el("p", "note spotify-uri", `Redirect-URI: ${redirectUri()}`));
 
   const hint = el("p", "note is-bad");
   hint.setAttribute("data-local-hint", "1");
-  if (bootError) {
-    hint.textContent = bootError;
-  } else {
-    hint.hidden = true;
-  }
+  if (bootError) hint.textContent = bootError;
+  else hint.hidden = true;
   body.append(hint);
 
   if (!isConfigured()) {
@@ -418,7 +481,7 @@ function render() {
     const deviceBox = el("div", "stack");
     deviceBox.setAttribute("data-devices", "1");
     body.append(deviceHint, deviceBox);
-    const refresh = el("button", "btn", "Aktualisieren");
+    const refresh = el("button", "btn primary", "Geräte aktualisieren");
     refresh.type = "button";
     refresh.addEventListener("click", () => refreshDevices());
     body.append(refresh);
@@ -453,17 +516,6 @@ function render() {
     }
     body.append(times);
 
-    const mute = el("label", "switch-row");
-    const check = document.createElement("input");
-    check.type = "checkbox";
-    check.checked = keepMuted;
-    muted = keepMuted;
-    check.addEventListener("change", () => {
-      muted = check.checked;
-    });
-    mute.append(check, el("span", "", "Stumm (dieses Gerät spielt nichts)"));
-    body.append(mute);
-
     const lag = el("p", "play-log");
     lag.setAttribute("data-lag", "1");
     const count = el("p", "lead");
@@ -488,8 +540,10 @@ function render() {
     dock.append(playBtn);
   }
 
+  appendDiagnose(body);
+
   body.append(el("hr", "spotify-rule"));
-  const online = el("div");
+  const online = el("div", "spotify-online");
   online.setAttribute("data-online", "1");
   body.append(online);
 
@@ -498,10 +552,12 @@ function render() {
   dock.append(hub);
 
   clipSec = keepClip;
-  muted = keepMuted;
+  muted = isMuted();
   showLobby();
   if (session) refreshDevices();
 }
+
+unsubDiagnose = onDiagnose(paintDiagnose);
 
 completeLoginIfRedirected()
   .then((ok) => {

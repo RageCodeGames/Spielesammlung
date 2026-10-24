@@ -790,12 +790,68 @@ body.spotify-test .switch-row input {
   flex: 0 0 auto;
 }
 
+body.spotify-test .mute-btn {
+  width: 48px;
+  min-width: 48px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+body.spotify-test .mute-btn.is-muted {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+body.spotify-test .mute-btn svg {
+  display: block;
+}
+
+body.spotify-test .spotify-diagnose {
+  max-height: 14rem;
+  overflow: auto;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+/* Keine verschachtelten Scrollbereiche: Lobby/Raum fließen in der Seitenliste. */
+body.spotify-test .spotify-online,
+body.spotify-test .spotify-online-flat,
+body.spotify-test .spotify-online-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+body.spotify-test [data-online].lobby,
 body.spotify-test [data-online] {
-  min-height: 22rem;
+  min-height: 0;
 }
 
 body.spotify-test [data-online] > .screen {
   width: 100%;
-  min-height: 20rem;
+  height: auto;
+  min-height: 0;
+  flex: none;
+  overflow: visible;
+}
+
+body.spotify-test [data-online] > .screen > .screen-body {
+  overflow: visible;
+  flex: none;
+  min-height: 0;
+  max-height: none;
+  padding-left: 0;
+  padding-right: 0;
+}
+
+body.spotify-test [data-online] > .screen > .screen-dock {
+  position: static;
+  box-shadow: none;
+  border-top: 1px solid rgba(244, 239, 230, 0.1);
+  padding-left: 0;
+  padding-right: 0;
+  padding-bottom: 0;
+  background: transparent;
 }
 
