@@ -21,11 +21,13 @@ import {
   login,
   logout,
   onDiagnose,
-  parseTrackUri,
+  parseTrackInput,
   pause,
   play,
   redirectUri,
+  resume,
   setPreferredDeviceId,
+  TEST_TRACK_URI,
 } from "../shared/spotify.js";
 
 const app = document.getElementById("app");
@@ -83,7 +85,39 @@ function selectedDeviceId() {
 
 function trackFromInput() {
   const input = app.querySelector("[name=track]");
-  return parseTrackUri(input?.value || "");
+  return parseTrackInput(input?.value || "");
+}
+
+function paintTrackPreview() {
+  const node = app.querySelector("[data-track-preview]");
+  const input = app.querySelector("[name=track]");
+  if (!node || !input) return;
+  if (!input.value.trim()) {
+    showNote(node, "");
+    return;
+  }
+  const { uri, error } = parseTrackInput(input.value);
+  showNote(node, uri ? `Wird gesendet als: ${uri}` : error, !uri);
+}
+
+async function resumeHere() {
+  const hint = app.querySelector("[data-local-hint]");
+  const id = selectedDeviceId();
+  if (!id) {
+    showNote(hint, NO_DEVICE_HINT, true);
+    return;
+  }
+  stopCountdown();
+  try {
+    const state = await resume(id);
+    showNote(
+      hint,
+      state?.isPlaying ? "Fortsetzen klappt – das Handy spielt." : "Fortsetzen angenommen, aber es läuft nichts.",
+      !state?.isPlaying
+    );
+  } catch (err) {
+    showError(hint, err, "Fortsetzen");
+  }
 }
 
 function paintDiagnose(rows) {
@@ -247,9 +281,9 @@ function handleCue(cue) {
 
 async function playAll() {
   const hint = app.querySelector("[data-local-hint]");
-  const uri = trackFromInput();
+  const { uri, error } = trackFromInput();
   if (!uri) {
-    showNote(hint, "Bitte einen Spotify-Song-Link einfügen (open.spotify.com/track/…).", true);
+    showNote(hint, error, true);
     return;
   }
   const sentAt = Date.now();
@@ -497,8 +531,13 @@ function render() {
     track.autocomplete = "off";
     track.spellcheck = false;
     track.value = keepTrack;
+    track.addEventListener("input", paintTrackPreview);
     trackLabel.append(track);
     body.append(trackLabel);
+    const preview = el("p", "note spotify-uri");
+    preview.setAttribute("data-track-preview", "1");
+    preview.hidden = true;
+    body.append(preview);
 
     body.append(el("h2", "lobby-list-title", "Dauer"));
     const times = el("div", "btn-row");
@@ -528,9 +567,9 @@ function render() {
     const playBtn = el("button", "btn primary", "Abspielen");
     playBtn.type = "button";
     playBtn.addEventListener("click", async () => {
-      const uri = trackFromInput();
+      const { uri, error } = trackFromInput();
       if (!uri) {
-        showNote(hint, "Bitte einen Spotify-Song-Link einfügen (open.spotify.com/track/…).", true);
+        showNote(hint, error, true);
         return;
       }
       playBtn.disabled = true;
@@ -541,6 +580,31 @@ function render() {
       }
     });
     dock.append(playBtn);
+
+    body.append(el("h2", "lobby-list-title", "Tests"));
+    const tests = el("div", "btn-row");
+    const resumeBtn = el("button", "btn", "Fortsetzen (ohne Track)");
+    resumeBtn.type = "button";
+    resumeBtn.addEventListener("click", async () => {
+      resumeBtn.disabled = true;
+      try {
+        await resumeHere();
+      } finally {
+        resumeBtn.disabled = false;
+      }
+    });
+    const testBtn = el("button", "btn", "Test-Track");
+    testBtn.type = "button";
+    testBtn.addEventListener("click", async () => {
+      testBtn.disabled = true;
+      try {
+        await playHere(TEST_TRACK_URI, 0, clipSec, Date.now());
+      } finally {
+        testBtn.disabled = false;
+      }
+    });
+    tests.append(resumeBtn, testBtn);
+    body.append(tests);
   }
 
   appendDiagnose(body);
@@ -557,6 +621,7 @@ function render() {
   clipSec = keepClip;
   muted = isMuted();
   showLobby();
+  paintTrackPreview();
   if (session) refreshDevices();
 }
 

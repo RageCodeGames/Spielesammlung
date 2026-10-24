@@ -16,7 +16,11 @@ const DEVICE_KEY = "kajuete:spotify-device";
 const REFRESH_MARGIN_MS = 60_000;
 const TRANSFER_WAIT_MS = 1000;
 const VERIFY_WAIT_MS = 1500;
-const DIAGNOSE_MAX = 40;
+const DIAGNOSE_MAX = 60;
+const TRACK_ID_PATTERN = /^[A-Za-z0-9]{22}$/;
+
+/** Fester, bekannter Song für den Technik-Test. */
+export const TEST_TRACK_URI = "spotify:track:4cOdK2wGLETKBW3PvgPWqT";
 
 export class SpotifyError extends Error {
   constructor(code, message, status = 0, extras = {}) {
@@ -61,21 +65,53 @@ export function setPreferredDeviceId(id) {
   set(DEVICE_KEY, id ? String(id) : null);
 }
 
-export function parseTrackUri(input) {
+/**
+ * Link oder URI → genau `spotify:track:<22 Zeichen>`.
+ * Query (?si=…), Hash und Pfad-Zusätze wie /intl-de/ fallen weg.
+ * @returns {{ uri: string, error: string }}
+ */
+export function parseTrackInput(input) {
   const raw = String(input || "").trim();
-  if (!raw) return "";
-  const spotify = raw.match(/^spotify:track:([A-Za-z0-9]+)/i);
-  if (spotify) return `spotify:track:${spotify[1]}`;
-  try {
-    const url = new URL(raw);
-    const fromPath = url.pathname.match(/\/track\/([A-Za-z0-9]+)/);
-    if (fromPath) return `spotify:track:${fromPath[1]}`;
-  } catch {
-    /* kein Link */
+  if (!raw) {
+    return { uri: "", error: "Bitte einen Spotify-Song-Link einfügen (open.spotify.com/track/…)." };
   }
-  const loose = raw.match(/track\/([A-Za-z0-9]+)/i);
-  if (loose) return `spotify:track:${loose[1]}`;
-  return "";
+  let id = "";
+  const colon = raw.match(/^spotify:track:([^?#\s/]*)/i);
+  if (colon) {
+    id = colon[1];
+  } else {
+    let path = raw.split(/[?#]/)[0];
+    try {
+      const url = new URL(raw);
+      if (!/(^|\.)spotify\.com$/i.test(url.hostname)) {
+        return {
+          uri: "",
+          error: "Nur open.spotify.com-Links gehen (keine spotify.link-Kurzlinks). Im Spotify-Menü „Link zum Song kopieren“ nutzen.",
+        };
+      }
+      path = url.pathname;
+    } catch {
+      /* kein vollständiger Link – roh prüfen */
+    }
+    id = path.match(/\/track\/([^/]*)/i)?.[1] || "";
+    if (!id && /\/(album|playlist|artist|episode|show)\//i.test(path)) {
+      return { uri: "", error: "Das ist kein Song-Link (Album, Playlist, Künstler oder Podcast)." };
+    }
+  }
+  if (!id) {
+    return { uri: "", error: "Kein Song-Link erkannt. Erwartet: https://open.spotify.com/track/…" };
+  }
+  if (!TRACK_ID_PATTERN.test(id)) {
+    return {
+      uri: "",
+      error: `Ungültige Track-ID „${id}“ (${id.length} Zeichen) – nötig sind genau 22 Zeichen A–Z, a–z, 0–9.`,
+    };
+  }
+  return { uri: `spotify:track:${id}`, error: "" };
+}
+
+export function parseTrackUri(input) {
+  return parseTrackInput(input).uri;
 }
 
 export function explainError(err) {
@@ -228,10 +264,48 @@ export async function getPlayback() {
   if (!data) return null;
   return {
     deviceId: data.device?.id || "",
+    deviceName: data.device?.name || "",
     isPlaying: data.is_playing === true,
     uri: data.item?.uri || "",
+    linkedFromUri: data.item?.linked_from?.uri || "",
+    type: data.currently_playing_type || "",
     progressMs: Number(data.progress_ms) || 0,
   };
+}
+
+/** GET /me/player lesen und URI, is_playing, Gerätename in die Diagnose schreiben (ohne Titel). */
+export async function checkPlayback(label = "Stand") {
+  let state = null;
+  try {
+    state = await getPlayback();
+  } catch (err) {
+    note(`${label}: Wiedergabestand nicht lesbar`, { status: err?.status || "error", reason: err?.reason || "" });
+    return null;
+  }
+  if (!state) {
+    note(`${label}: GET /me/player → nichts aktiv (HTTP 204)`, { status: "leer" });
+    return null;
+  }
+  const bits = [
+    `item.uri=${state.uri || "–"}`,
+    state.linkedFromUri ? `linked_from=${state.linkedFromUri}` : "",
+    `is_playing=${state.isPlaying}`,
+    `Gerät=${state.deviceName || "–"}`,
+    state.type && state.type !== "track" ? `Typ=${state.type}` : "",
+    `progress=${Math.round(state.progressMs / 1000)}s`,
+  ].filter(Boolean);
+  note(`${label}: ${bits.join(" · ")}`, { status: state.isPlaying ? "spielt" : "steht" });
+  return state;
+}
+
+/** PUT /me/player/play ohne Body – nur Fortsetzen, danach Stand prüfen. */
+export async function resume(deviceId) {
+  if (!deviceId) throw new SpotifyError("no-device", "Kein Gerät gewählt.");
+  const path = `/me/player/play?device_id=${encodeURIComponent(deviceId)}`;
+  note(`Fortsetzen: PUT ${path} · ohne Body`);
+  await api("PUT", path);
+  await sleep(VERIFY_WAIT_MS);
+  return checkPlayback("Prüfung Fortsetzen");
 }
 
 function sleep(ms) {
@@ -248,10 +322,9 @@ function note(message, extras = {}) {
  * 2. Nach 1,5 s prüfen, ob der richtige Track läuft; sonst play einmal wiederholen.
  */
 export async function play(trackUri, deviceId, startMs = 0) {
-  const uri = parseTrackUri(trackUri) || trackUri;
-  if (!uri || !uri.startsWith("spotify:track:")) {
-    throw new SpotifyError("bad-track", "Das ist kein gültiger Spotify-Song-Link.");
-  }
+  const parsed = parseTrackInput(trackUri);
+  if (!parsed.uri) throw new SpotifyError("bad-track", parsed.error);
+  const uri = parsed.uri;
   if (!deviceId) {
     throw new SpotifyError(
       "no-device",
@@ -272,12 +345,14 @@ export async function play(trackUri, deviceId, startMs = 0) {
   }
 
   if (target.active) {
-    note("Gerät ist aktiv – kein Transfer, direkt abspielen");
+    note(`Gerät „${target.name}“ ist aktiv – kein Transfer, direkt abspielen`);
   } else {
-    note("Gerät nicht aktiv – Transfer mit play: true");
+    note(`Gerät „${target.name}“ nicht aktiv – Transfer mit play: true`);
     await transferPlayback(deviceId, true);
     await sleep(TRANSFER_WAIT_MS);
   }
+  const sent = `Sende: PUT ${playPath} · URI=${uri} · Body=${JSON.stringify(body)}`;
+  note(sent);
   await api("PUT", playPath, body);
   const acceptedAt = Date.now();
 
@@ -285,6 +360,7 @@ export async function play(trackUri, deviceId, startMs = 0) {
   if (await verifyPlaying(uri, deviceId, "Prüfung 1")) return { acceptedAt, retried: false };
 
   note("Falscher Track oder gestoppt – Play einmal wiederholen");
+  note(sent);
   await api("PUT", playPath, body);
   const retryAt = Date.now();
   await sleep(VERIFY_WAIT_MS);
@@ -299,14 +375,8 @@ export async function play(trackUri, deviceId, startMs = 0) {
 }
 
 async function verifyPlaying(uri, deviceId, label) {
-  let state = null;
-  try {
-    state = await getPlayback();
-  } catch (err) {
-    note(`${label}: Wiedergabestand nicht lesbar`, { status: err?.status || "error", reason: err?.reason || "" });
-    return false;
-  }
-  const rightTrack = state?.uri === uri;
+  const state = await checkPlayback(label);
+  const rightTrack = Boolean(state && (state.uri === uri || state.linkedFromUri === uri));
   const rightDevice = !state?.deviceId || state.deviceId === deviceId;
   const ok = Boolean(state && rightTrack && state.isPlaying && rightDevice);
   note(
