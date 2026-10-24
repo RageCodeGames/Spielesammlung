@@ -8,7 +8,7 @@
  * skipWaiting läuft nicht von selbst – erst, wenn das Banner angetippt wird.
  */
 
-const CACHE_NAME = "kajuete-v23";
+const CACHE_NAME = "kajuete-v25";
 
 const PRECACHE = [
   "./",
@@ -30,6 +30,10 @@ const PRECACHE = [
   "./shared/vendor/qrcode-generator.js",
   "./dev/online-test.html",
   "./dev/online-test.js",
+  "./dev/spotify-test.html",
+  "./dev/spotify-test.js",
+  "./shared/spotify-config.js",
+  "./shared/spotify.js",
   "./games/tapper/index.html",
   "./games/tapper/game.css",
   "./games/tapper/logic.js",
@@ -115,6 +119,16 @@ self.addEventListener("message", (event) => {
   }
 });
 
+function isSpotifyRequest(url) {
+  const host = url.hostname;
+  return (
+    host === "api.spotify.com" ||
+    host === "accounts.spotify.com" ||
+    host.endsWith(".spotify.com") ||
+    host.endsWith(".scdn.co")
+  );
+}
+
 function isFirebaseRequest(url) {
   const host = url.hostname;
   const path = url.pathname;
@@ -139,6 +153,8 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   // Firebase Auth + Realtime Database nie aus dem Cache, auch nicht später per Proxy.
   if (isFirebaseRequest(url)) return;
+  // Spotify Auth + Web API nie cachen (Tokens, Play-Befehle).
+  if (isSpotifyRequest(url)) return;
   if (url.origin !== self.location.origin) return;
   if (url.protocol !== "http:" && url.protocol !== "https:") return;
   if (request.url.split("?")[0] === SW_URL) return;

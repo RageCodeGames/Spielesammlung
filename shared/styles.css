@@ -243,7 +243,8 @@ body.page .shell {
 
 body.schiffe #app,
 body.tapper #app,
-body.online-test #app {
+body.online-test #app,
+body.spotify-test #app {
   padding-top: var(--safe-top);
   padding-left: var(--safe-left);
   padding-right: var(--safe-right);
@@ -319,7 +320,8 @@ body.online-test #app {
 body.schiffe #app:not(:has(> .screen)),
 body.tapper #app:not(:has(> .screen)),
 body.tempel #app:not(:has(> .screen)),
-body.online-test #app:not(:has(> .screen)) {
+body.online-test #app:not(:has(> .screen)),
+body.spotify-test #app:not(:has(> .screen)) {
   padding-bottom: var(--dock-bottom);
 }
 
@@ -762,5 +764,38 @@ body.online-test #app:not(:has(> .screen)) {
 
 .room-menu-pop .btn {
   width: 100%;
+}
+
+body.spotify-test hr.spotify-rule {
+  border: 0;
+  border-top: 1px solid rgba(244, 239, 230, 0.12);
+  margin: 0.4rem 0 0;
+}
+
+body.spotify-test .spotify-uri {
+  user-select: text;
+  -webkit-user-select: text;
+  overflow-wrap: anywhere;
+}
+
+body.spotify-test .switch-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+body.spotify-test .switch-row input {
+  width: 1.25rem;
+  height: 1.25rem;
+  flex: 0 0 auto;
+}
+
+body.spotify-test [data-online] {
+  min-height: 22rem;
+}
+
+body.spotify-test [data-online] > .screen {
+  width: 100%;
+  min-height: 20rem;
 }
 
