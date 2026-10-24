@@ -169,11 +169,14 @@ async function playHere(trackUri, startMs, clip, sentAt) {
     if (lagNode) lagNode.textContent = "";
     return;
   }
-  const t0 = Date.now();
+  const t0 = Number(sentAt) || Date.now();
+  if (lagNode) lagNode.textContent = "Starte …";
   try {
-    await play(trackUri, id, startMs);
-    const lag = Date.now() - (Number(sentAt) || t0);
-    if (lagNode) lagNode.textContent = `Abspielen bestätigt nach ${lag} ms`;
+    const result = await play(trackUri, id, startMs);
+    const lag = (result?.acceptedAt || Date.now()) - t0;
+    if (lagNode) {
+      lagNode.textContent = `Abspielen bestätigt nach ${lag} ms${result?.retried ? " (nach Wiederholung)" : ""}`;
+    }
     showNote(hint, "");
     startCountdown(clip);
   } catch (err) {

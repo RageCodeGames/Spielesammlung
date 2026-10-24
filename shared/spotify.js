@@ -14,7 +14,8 @@ const TOKEN_KEY = "kajuete:spotify-tokens";
 const PKCE_KEY = "kajuete:spotify-pkce";
 const DEVICE_KEY = "kajuete:spotify-device";
 const REFRESH_MARGIN_MS = 60_000;
-const TRANSFER_WAIT_MS = 600;
+const TRANSFER_WAIT_MS = 1000;
+const VERIFY_WAIT_MS = 1500;
 const DIAGNOSE_MAX = 40;
 
 export class SpotifyError extends Error {
@@ -123,10 +124,12 @@ function pushDiagnose(entry) {
 
 export function formatDiagnoseLine(row) {
   const time = new Date(row.at).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const parts = [`${time} ${row.method || ""} ${row.path || ""} → HTTP ${row.status ?? "–"}`];
-  if (row.reason) parts.push(`reason=${row.reason}`);
-  if (row.message) parts.push(row.message);
-  if (row.detail && row.detail !== row.message) parts.push(row.detail);
+  const text = (value) => (value == null ? "" : typeof value === "string" ? value : JSON.stringify(value));
+  const head = row.path ? `${row.method || ""} ${row.path} → HTTP ${text(row.status) || "–"}` : `${row.method || ""}`;
+  const parts = [`${time} ${head}`];
+  if (row.reason) parts.push(`reason=${text(row.reason)}`);
+  if (row.message) parts.push(text(row.message));
+  if (row.detail && row.detail !== row.message) parts.push(text(row.detail));
   return parts.join(" · ");
 }
 
@@ -210,8 +213,8 @@ export async function getDevices() {
   }));
 }
 
-/** Wiedergabe auf ein Gerät legen, ohne abzuspielen. */
-export async function transferPlayback(deviceId, shouldPlay = false) {
+/** Wiedergabe auf ein Gerät legen. Mit play: false pausiert Spotify die laufende Wiedergabe. */
+export async function transferPlayback(deviceId, shouldPlay = true) {
   if (!deviceId) throw new SpotifyError("no-device", "Kein Gerät gewählt.");
   await api("PUT", "/me/player", {
     device_ids: [deviceId],
@@ -219,13 +222,30 @@ export async function transferPlayback(deviceId, shouldPlay = false) {
   });
 }
 
+/** Aktueller Wiedergabestand (null, wenn nichts läuft). Titel bleiben intern. */
+export async function getPlayback() {
+  const data = await api("GET", "/me/player");
+  if (!data) return null;
+  return {
+    deviceId: data.device?.id || "",
+    isPlaying: data.is_playing === true,
+    uri: data.item?.uri || "",
+    progressMs: Number(data.progress_ms) || 0,
+  };
+}
+
 function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function note(message, extras = {}) {
+  pushDiagnose({ method: "play", path: "", status: "…", message, ...extras });
+}
+
 /**
- * Song starten: zuerst Transfer auf das Gerät, kurz warten, dann Play.
- * Bei Fehler einmal Transfer + Play wiederholen.
+ * Song starten:
+ * 1. Gerät schon aktiv → direkt play, sonst Transfer mit play: true, 1 s warten, dann play.
+ * 2. Nach 1,5 s prüfen, ob der richtige Track läuft; sonst play einmal wiederholen.
  */
 export async function play(trackUri, deviceId, startMs = 0) {
   const uri = parseTrackUri(trackUri) || trackUri;
@@ -242,32 +262,60 @@ export async function play(trackUri, deviceId, startMs = 0) {
   const body = { uris: [uri], position_ms: position };
   const playPath = `/me/player/play?device_id=${encodeURIComponent(deviceId)}`;
 
-  async function attempt(label) {
-    pushDiagnose({
-      method: "PUT",
-      path: "/me/player (transfer)",
-      status: "…",
-      message: `${label}: Wiedergabe auf Gerät legen`,
-      detail: deviceId,
-    });
-    await transferPlayback(deviceId, false);
-    await sleep(TRANSFER_WAIT_MS);
-    await api("PUT", playPath, body);
+  const devices = await getDevices();
+  const target = devices.find((device) => device.id === deviceId);
+  if (!target) {
+    throw new SpotifyError(
+      "no-device",
+      "Das gewählte Gerät ist nicht mehr da. Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren."
+    );
   }
 
-  try {
-    await attempt("1/2");
-  } catch (err) {
-    pushDiagnose({
-      method: "retry",
-      path: playPath,
-      status: err?.status || "error",
-      reason: err?.reason || err?.code || "",
-      message: `Erster Play fehlgeschlagen – einmal wiederholen. ${explainError(err)}`,
-    });
-    await sleep(400);
-    await attempt("2/2");
+  if (target.active) {
+    note("Gerät ist aktiv – kein Transfer, direkt abspielen");
+  } else {
+    note("Gerät nicht aktiv – Transfer mit play: true");
+    await transferPlayback(deviceId, true);
+    await sleep(TRANSFER_WAIT_MS);
   }
+  await api("PUT", playPath, body);
+  const acceptedAt = Date.now();
+
+  await sleep(VERIFY_WAIT_MS);
+  if (await verifyPlaying(uri, deviceId, "Prüfung 1")) return { acceptedAt, retried: false };
+
+  note("Falscher Track oder gestoppt – Play einmal wiederholen");
+  await api("PUT", playPath, body);
+  const retryAt = Date.now();
+  await sleep(VERIFY_WAIT_MS);
+  if (await verifyPlaying(uri, deviceId, "Prüfung 2")) return { acceptedAt: retryAt, retried: true };
+
+  throw new SpotifyError(
+    "not-playing",
+    "Spotify hat den Befehl angenommen, aber der Song läuft nicht. Spotify-App öffnen und nochmal versuchen.",
+    0,
+    { reason: "NOT_PLAYING" }
+  );
+}
+
+async function verifyPlaying(uri, deviceId, label) {
+  let state = null;
+  try {
+    state = await getPlayback();
+  } catch (err) {
+    note(`${label}: Wiedergabestand nicht lesbar`, { status: err?.status || "error", reason: err?.reason || "" });
+    return false;
+  }
+  const rightTrack = state?.uri === uri;
+  const rightDevice = !state?.deviceId || state.deviceId === deviceId;
+  const ok = Boolean(state && rightTrack && state.isPlaying && rightDevice);
+  note(
+    `${label}: ${ok ? "läuft ✓" : "läuft nicht"} (richtiger Track: ${rightTrack ? "ja" : "nein"}, spielt: ${
+      state?.isPlaying ? "ja" : "nein"
+    }, Gerät: ${rightDevice ? "ja" : "anderes"})`,
+    { status: ok ? "ok" : "fehlt" }
+  );
+  return ok;
 }
 
 export async function pause(deviceId) {
@@ -319,19 +367,18 @@ async function api(method, path, body) {
     }
   }
 
-  const reason = String(data?.error?.reason || "");
-  const message = String(data?.error?.message || data?.error_description || "");
+  const { reason, message } = readApiError(data);
   pushDiagnose({
     method,
     path,
     status: response.status,
-    reason: reason || (response.ok ? "" : String(data?.error || "")),
+    reason: response.ok ? "" : reason,
     message: response.ok
       ? response.status === 204 || response.status === 202
         ? "OK (kein Inhalt)"
         : "OK"
       : message || `Fehler ${response.status}`,
-    detail: text && text.length < 400 ? text : "",
+    detail: !response.ok && text && text.length < 400 ? text : "",
   });
 
   if (response.status === 204 || response.status === 202) return null;
@@ -442,12 +489,13 @@ async function fetchMe(accessToken) {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   const data = await response.json().catch(() => ({}));
+  const failure = readApiError(data);
   pushDiagnose({
     method: "GET",
     path: "/me",
     status: response.status,
-    reason: data?.error?.reason || "",
-    message: response.ok ? data?.display_name || data?.id || "Profil OK" : data?.error?.message || `HTTP ${response.status}`,
+    reason: response.ok ? "" : failure.reason,
+    message: response.ok ? "Profil OK" : failure.message || `HTTP ${response.status}`,
   });
   if (!response.ok) throw fromApiError(response.status, data, "/me");
   return data;
@@ -484,9 +532,23 @@ function fromTokenError(status, data) {
   return new SpotifyError("auth", desc || "Anmeldung bei Spotify fehlgeschlagen.", status);
 }
 
+/** Web-API-Fehler: { error: { status, message, reason } }; Token-Fehler: { error: "…", error_description }. */
+function readApiError(data) {
+  const err = data?.error;
+  if (err && typeof err === "object") {
+    return {
+      reason: typeof err.reason === "string" ? err.reason : "",
+      message: typeof err.message === "string" ? err.message : "",
+    };
+  }
+  return {
+    reason: typeof err === "string" ? err : "",
+    message: typeof data?.error_description === "string" ? data.error_description : typeof data?.raw === "string" ? data.raw : "",
+  };
+}
+
 function fromApiError(status, data, path = "") {
-  const reason = String(data?.error?.reason || "");
-  const message = String(data?.error?.message || data?.error_description || data?.error || "");
+  const { reason, message } = readApiError(data);
   const blob = `${reason} ${message}`.toLowerCase();
   const extras = { reason, detail: message, path };
 
