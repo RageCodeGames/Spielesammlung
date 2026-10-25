@@ -36,6 +36,7 @@ import {
 const app = document.getElementById("app");
 const NO_DEVICE_HINT =
   "Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren.";
+const END_MARGIN_MS = 2000;
 
 let session = getStoredSession();
 let devices = [];
@@ -161,11 +162,18 @@ async function startHere(runner, clip, sentAt) {
       lagNode.textContent = `Abspielen bestätigt nach ${lag} ms${result?.retried ? " (nach Wiederholung)" : ""}`;
     }
     showNote(hint, "");
-    startCountdown(clip);
+    startCountdown(clip, result?.state);
   } catch (err) {
     if (lagNode) lagNode.textContent = "";
     showError(hint, err, "Abspielen");
   }
+}
+
+/** Restzeit bis kurz vor Songende (ms) oder 0, wenn die Länge unbekannt ist. */
+function msUntilSongEnd(state) {
+  if (!state?.durationMs) return 0;
+  const elapsed = Date.now() - (state.checkedAt || Date.now());
+  return Math.max(1000, state.durationMs - state.progressMs - elapsed - END_MARGIN_MS);
 }
 
 function paintDiagnose(rows) {
@@ -186,19 +194,26 @@ function stopCountdown() {
   if (node) node.textContent = "";
 }
 
-function startCountdown(seconds) {
+function startCountdown(seconds, state) {
   stopCountdown();
   const node = app.querySelector("[data-countdown]");
-  if (!seconds) {
-    if (node) node.textContent = "Ganzer Song – kein automatisches Pause.";
+  const clipMs = seconds ? seconds * 1000 : Infinity;
+  const endMs = msUntilSongEnd(state) || Infinity;
+  const waitMs = Math.min(clipMs, endMs);
+  if (waitMs === Infinity) {
+    if (node) node.textContent = "Ganzer Song – Länge unbekannt, kein automatisches Pause.";
     return;
   }
-  countdownUntil = Date.now() + seconds * 1000;
+  const beforeEnd = endMs <= clipMs;
+  const doneText = beforeEnd ? "Automatisch pausiert (kurz vor Songende)." : `Automatisch pausiert (${seconds} Sekunden).`;
+  countdownUntil = Date.now() + waitMs;
   let pausing = false;
   const tick = async () => {
     const left = Math.max(0, Math.ceil((countdownUntil - Date.now()) / 1000));
     const label = app.querySelector("[data-countdown]");
-    if (label) label.textContent = left ? `Pause in ${left}s` : "Pausiere …";
+    if (label) {
+      label.textContent = left ? `${beforeEnd ? "Pause vor Songende" : "Pause"} in ${left}s` : "Pausiere …";
+    }
     if (left > 0 || pausing) return;
     pausing = true;
     window.clearInterval(countdownTimer);
@@ -212,7 +227,7 @@ function startCountdown(seconds) {
       await pause(id);
       if (label) label.textContent = "Pausiert";
       const hint = app.querySelector("[data-local-hint]");
-      showNote(hint, "Automatisch pausiert (30 Sekunden).");
+      showNote(hint, doneText);
     } catch (err) {
       if (label) label.textContent = "Pause fehlgeschlagen";
       const hint = app.querySelector("[data-local-hint]");
@@ -243,8 +258,28 @@ async function playQueueHere(trackUri, clip, sentAt) {
   await startHere((id) => playViaQueue(trackUri, id), clip, sentAt);
 }
 
-async function playPlaylistHere(playlistInput, position, clip, sentAt) {
-  await startHere((id) => playViaPlaylist(playlistInput, position, id), clip, sentAt);
+async function playPlaylistHere(playlistInput, target, clip, sentAt) {
+  await startHere((id) => playViaPlaylist(playlistInput, target, id), clip, sentAt);
+}
+
+/**
+ * Standardweg aus den Feldern lesen: Playlist + Song-ID (falls Song-Link da), sonst Position.
+ * @returns {{ playlistUri: string, trackUri: string, position: number, error: string }}
+ */
+function playlistTargetFromInputs({ forceMode = "" } = {}) {
+  const playlist = parsePlaylistInput(app.querySelector("[name=playlist]")?.value || "");
+  if (!playlist.uri) return { playlistUri: "", trackUri: "", position: 0, error: playlist.error };
+  const position = Math.max(0, Math.floor(Number(app.querySelector("[name=playlist-offset]")?.value) || 0));
+  const trackRaw = app.querySelector("[name=track]")?.value || "";
+  const useTrack = forceMode === "track" || (forceMode !== "position" && trackRaw.trim());
+  if (!useTrack) return { playlistUri: playlist.uri, trackUri: "", position, error: "" };
+  const track = parseTrackInput(trackRaw);
+  if (!track.uri) return { playlistUri: "", trackUri: "", position: 0, error: track.error };
+  return { playlistUri: playlist.uri, trackUri: track.uri, position: 0, error: "" };
+}
+
+function cueTarget(cue) {
+  return cue.trackUri ? { trackUri: cue.trackUri } : { position: Number(cue.position) || 0 };
 }
 
 async function refreshDevices() {
@@ -300,25 +335,34 @@ function paintDevices(box) {
 }
 
 function handleCue(cue) {
-  if (!cue?.trackUri) return;
+  if (!cue?.playlistUri && !cue?.trackUri) return;
   const seq = Number(cue.seq) || 0;
   if (seq && seq <= lastCueSeq) return;
   if (seq) lastCueSeq = seq;
-  playHere(cue.trackUri, cue.startMs || 0, Number(cue.clipSec) || 0, cue.sentAt);
+  const clip = Number(cue.clipSec) || 0;
+  if (cue.playlistUri) playPlaylistHere(cue.playlistUri, cueTarget(cue), clip, cue.sentAt);
+  else playHere(cue.trackUri, cue.startMs || 0, clip, cue.sentAt);
 }
 
 async function playAll() {
   const hint = app.querySelector("[data-local-hint]");
-  const { uri, error } = trackFromInput();
-  if (!uri) {
-    showNote(hint, error, true);
+  const target = playlistTargetFromInputs();
+  if (target.error) {
+    showNote(hint, target.error, true);
     return;
   }
   const sentAt = Date.now();
   const seq = lastCueSeq + 1;
   lastCueSeq = seq;
-  const cue = { seq, trackUri: uri, startMs: 0, sentAt, clipSec };
-  await playHere(uri, 0, clipSec, sentAt);
+  const cue = {
+    seq,
+    playlistUri: target.playlistUri,
+    trackUri: target.trackUri,
+    position: target.position,
+    sentAt,
+    clipSec,
+  };
+  await playPlaylistHere(cue.playlistUri, cueTarget(cue), clipSec, sentAt);
   if (!room) return;
   try {
     await sendAction({ type: "play-all", payload: cue });
@@ -393,7 +437,7 @@ function showRoomPlay(initial) {
     el(
       "p",
       "note",
-      "Der Host schickt nur die Track-URI. Jedes Handy startet den Song auf seinem eigenen Spotify-Gerät."
+      "Der Host schickt Playlist-ID plus Song-ID (oder Position). Jedes Handy startet den Song auf seinem eigenen Spotify-Gerät."
     )
   );
 
@@ -553,8 +597,30 @@ function render() {
     refresh.addEventListener("click", () => refreshDevices());
     body.append(refresh);
 
-    body.append(el("h2", "lobby-list-title", "Song"));
-    const trackLabel = el("label", "lobby-field", "Spotify-Link");
+    body.append(el("h2", "lobby-list-title", "Playlist (Standardweg)"));
+    body.append(
+      el(
+        "p",
+        "note",
+        "Abspielen läuft über die Playlist: mit Song-Link startet genau dieser Song (muss in der Playlist sein), ohne Song-Link die Position."
+      )
+    );
+    const plLabel = el("label", "lobby-field", "Playlist-Link");
+    const plInput = el("input", "text-input");
+    plInput.name = "playlist";
+    plInput.placeholder = "https://open.spotify.com/playlist/…";
+    plInput.autocomplete = "off";
+    plInput.spellcheck = false;
+    plInput.value = keepPlaylist;
+    plInput.addEventListener("input", paintPlaylistPreview);
+    plLabel.append(plInput);
+    body.append(plLabel);
+    const plPreview = el("p", "note spotify-uri");
+    plPreview.setAttribute("data-playlist-preview", "1");
+    plPreview.hidden = true;
+    body.append(plPreview);
+
+    const trackLabel = el("label", "lobby-field", "Song-Link (optional)");
     const track = el("input", "text-input");
     track.name = "track";
     track.placeholder = "https://open.spotify.com/track/…";
@@ -568,6 +634,16 @@ function render() {
     preview.setAttribute("data-track-preview", "1");
     preview.hidden = true;
     body.append(preview);
+
+    const offsetLabel = el("label", "lobby-field", "Position in der Playlist (ab 0, nur ohne Song-Link)");
+    const offsetInput = el("input", "text-input");
+    offsetInput.name = "playlist-offset";
+    offsetInput.type = "number";
+    offsetInput.min = "0";
+    offsetInput.step = "1";
+    offsetInput.value = keepOffset;
+    offsetLabel.append(offsetInput);
+    body.append(offsetLabel);
 
     body.append(el("h2", "lobby-list-title", "Dauer"));
     const times = el("div", "btn-row");
@@ -597,101 +673,62 @@ function render() {
     const playBtn = el("button", "btn primary", "Abspielen");
     playBtn.type = "button";
     playBtn.addEventListener("click", async () => {
-      const { uri, error } = trackFromInput();
-      if (!uri) {
-        showNote(hint, error, true);
+      const target = playlistTargetFromInputs();
+      if (target.error) {
+        showNote(hint, target.error, true);
         return;
       }
       playBtn.disabled = true;
       try {
-        await playHere(uri, 0, clipSec, Date.now());
+        await playPlaylistHere(target.playlistUri, cueTarget(target), clipSec, Date.now());
       } finally {
         playBtn.disabled = false;
       }
     });
     dock.append(playBtn);
 
-    body.append(el("h2", "lobby-list-title", "Tests"));
-    const tests = el("div", "btn-row");
-    const resumeBtn = el("button", "btn", "Fortsetzen (ohne Track)");
-    resumeBtn.type = "button";
-    resumeBtn.addEventListener("click", async () => {
-      resumeBtn.disabled = true;
-      try {
-        await resumeHere();
-      } finally {
-        resumeBtn.disabled = false;
-      }
-    });
-    const testBtn = el("button", "btn", "Test-Track");
-    testBtn.type = "button";
-    testBtn.addEventListener("click", async () => {
-      testBtn.disabled = true;
-      try {
-        await playHere(TEST_TRACK_URI, 0, clipSec, Date.now());
-      } finally {
-        testBtn.disabled = false;
-      }
-    });
-    const queueBtn = el("button", "btn", "Über Warteschlange");
-    queueBtn.type = "button";
-    queueBtn.addEventListener("click", async () => {
+    /** Testknopf, der einen Start-Weg mit den aktuellen Feldern ausführt. */
+    const testButton = (label, run) => {
+      const button = el("button", "btn", label);
+      button.type = "button";
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await run();
+        } finally {
+          button.disabled = false;
+        }
+      });
+      return button;
+    };
+    const withTrack = (run) => async () => {
       const { uri, error } = trackFromInput();
       if (!uri) {
         showNote(hint, error, true);
         return;
       }
-      queueBtn.disabled = true;
-      try {
-        await playQueueHere(uri, clipSec, Date.now());
-      } finally {
-        queueBtn.disabled = false;
-      }
-    });
-    tests.append(resumeBtn, testBtn, queueBtn);
-    body.append(tests);
-
-    body.append(el("h2", "lobby-list-title", "Über Playlist"));
-    const plLabel = el("label", "lobby-field", "Playlist-Link");
-    const plInput = el("input", "text-input");
-    plInput.name = "playlist";
-    plInput.placeholder = "https://open.spotify.com/playlist/…";
-    plInput.autocomplete = "off";
-    plInput.spellcheck = false;
-    plInput.value = keepPlaylist;
-    plInput.addEventListener("input", paintPlaylistPreview);
-    plLabel.append(plInput);
-    body.append(plLabel);
-    const plPreview = el("p", "note spotify-uri");
-    plPreview.setAttribute("data-playlist-preview", "1");
-    plPreview.hidden = true;
-    body.append(plPreview);
-    const offsetLabel = el("label", "lobby-field", "Position (ab 0)");
-    const offsetInput = el("input", "text-input");
-    offsetInput.name = "playlist-offset";
-    offsetInput.type = "number";
-    offsetInput.min = "0";
-    offsetInput.step = "1";
-    offsetInput.value = keepOffset;
-    offsetLabel.append(offsetInput);
-    body.append(offsetLabel);
-    const playlistBtn = el("button", "btn", "Über Playlist");
-    playlistBtn.type = "button";
-    playlistBtn.addEventListener("click", async () => {
-      const { uri, error } = parsePlaylistInput(plInput.value);
-      if (!uri) {
-        showNote(hint, error, true);
+      await run(uri);
+    };
+    const withPlaylist = (mode) => async () => {
+      const target = playlistTargetFromInputs({ forceMode: mode });
+      if (target.error) {
+        showNote(hint, target.error, true);
         return;
       }
-      const pos = Math.max(0, Math.floor(Number(offsetInput.value) || 0));
-      playlistBtn.disabled = true;
-      try {
-        await playPlaylistHere(uri, pos, clipSec, Date.now());
-      } finally {
-        playlistBtn.disabled = false;
-      }
-    });
-    body.append(playlistBtn);
+      await playPlaylistHere(target.playlistUri, cueTarget(target), clipSec, Date.now());
+    };
+
+    body.append(el("h2", "lobby-list-title", "Tests"));
+    const tests = el("div", "btn-row");
+    tests.append(
+      testButton("Über Playlist (Position)", withPlaylist("position")),
+      testButton("Über Playlist (Song-ID)", withPlaylist("track")),
+      testButton("Fortsetzen (ohne Track)", resumeHere),
+      testButton("Direkt (uris)", withTrack((uri) => playHere(uri, 0, clipSec, Date.now()))),
+      testButton("Über Warteschlange", withTrack((uri) => playQueueHere(uri, clipSec, Date.now()))),
+      testButton("Test-Track (uris)", () => playHere(TEST_TRACK_URI, 0, clipSec, Date.now()))
+    );
+    body.append(tests);
   }
 
   appendDiagnose(body);
