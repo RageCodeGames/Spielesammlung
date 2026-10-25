@@ -1,5 +1,6 @@
 import { normalizeRemote, readArray } from "../../shared/online.js";
 import { effectiveYear } from "./suspicious.js";
+import { FALLBACK_START_MAX_MS, FALLBACK_START_MIN_MS } from "./play-policy.js";
 import {
   BUY_COST,
   CHALLENGE_COST,
@@ -53,20 +54,30 @@ export function normalizeSettings(raw) {
 }
 
 /**
- * Startposition im Song.
- * Zufällig 20–60 % der Länge; 30-s-Clips behalten ≥ 35 s bis zum Ende.
+ * Startposition im Song – immer für den Play-Aufruf (kein nachträgliches Seek).
+ * Mit Länge: 20–60 %, 30-s-Clips behalten ≥ 35 s bis zum Ende.
+ * Ohne Länge: 30–70 s. Songs unter 2:30 (falls bekannt) entsprechend früher.
  */
 export function computeStartMs(durationMs, clipSec, startMode, ratio) {
+  if (startMode !== START_MODE_RANDOM) return 0;
   const duration = Math.max(0, Math.floor(Number(durationMs) || 0));
-  if (startMode !== START_MODE_RANDOM || duration <= 0) return 0;
-  if (!Number.isFinite(Number(ratio))) return 0;
-  const r = Math.min(0.6, Math.max(0.2, Number(ratio)));
+  const unit = Number(ratio);
+
+  if (duration <= 0) {
+    const t = Number.isFinite(unit) ? Math.min(1, Math.max(0, unit)) : 0.5;
+    return Math.round(FALLBACK_START_MIN_MS + t * (FALLBACK_START_MAX_MS - FALLBACK_START_MIN_MS));
+  }
+
+  const r = Number.isFinite(unit) ? Math.min(0.6, Math.max(0.2, unit)) : 0.4;
   const minStart = Math.floor(duration * 0.2);
   let maxStart = Math.floor(duration * 0.6);
   if (Number(clipSec) === 30) {
     maxStart = Math.min(maxStart, duration - 35_000);
   } else {
     maxStart = Math.min(maxStart, Math.max(0, duration - 3_000));
+  }
+  if (duration < 150_000) {
+    maxStart = Math.min(maxStart, FALLBACK_START_MAX_MS, Math.max(0, duration - 35_000));
   }
   if (maxStart <= 0) return 0;
   if (maxStart < minStart) return maxStart;
@@ -455,7 +466,8 @@ export function makeCue(song, clipSec, fallbackPlaylistId = "", startMode = STAR
   const sentAt = Date.now();
   const mode = startMode === START_MODE_START ? START_MODE_START : START_MODE_RANDOM;
   const durationMs = packed.durationMs || 0;
-  const startRatio = mode === START_MODE_RANDOM ? 0.2 + Math.random() * 0.4 : 0;
+  const startRatio =
+    mode === START_MODE_RANDOM ? (durationMs > 0 ? 0.2 + Math.random() * 0.4 : Math.random()) : 0;
   const positionMs = computeStartMs(durationMs, clipSec, mode, startRatio);
   const cue = {
     cueId: `${sentAt}-${Math.random().toString(36).slice(2, 8)}`,

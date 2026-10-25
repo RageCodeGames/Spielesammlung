@@ -5,6 +5,7 @@
 
 import { SPOTIFY_CLIENT_ID } from "./spotify-config.js";
 import { get, set } from "./storage.js";
+import { isTransientSpotifyStatus, spotifyRetryDelayMs } from "./spotify-retry.js";
 
 const AUTH_URL = "https://accounts.spotify.com/authorize";
 const TOKEN_URL = "https://accounts.spotify.com/api/token";
@@ -31,6 +32,7 @@ export class SpotifyError extends Error {
     this.reason = extras.reason || "";
     this.detail = extras.detail || "";
     this.path = extras.path || "";
+    this.retryAfter = extras.retryAfter || "";
   }
 }
 
@@ -350,7 +352,7 @@ export async function checkPlayback(label = "Stand") {
   return state;
 }
 
-/** Gerät vorbereiten: aktiv → nichts, sonst Transfer mit play: true. */
+/** Gerät vorbereiten: aktiv → nichts, sonst Transfer mit play: false (kein Songstart). */
 async function ensureDeviceReady(deviceId) {
   if (!deviceId) {
     throw new SpotifyError(
@@ -369,8 +371,8 @@ async function ensureDeviceReady(deviceId) {
   if (target.active) {
     note(`Gerät „${target.name}“ ist aktiv – kein Transfer`);
   } else {
-    note(`Gerät „${target.name}“ nicht aktiv – Transfer mit play: true`);
-    await transferPlayback(deviceId, true);
+    note(`Gerät „${target.name}“ nicht aktiv – Transfer mit play: false (Start erst per Play + position_ms)`);
+    await transferPlayback(deviceId, false);
     await sleep(TRANSFER_WAIT_MS);
   }
   return target;
@@ -422,7 +424,14 @@ function trackUnavailable(err) {
 }
 
 function isPlayRejected(err) {
-  const deviceMissing = err?.reason === "NO_ACTIVE_DEVICE" || /device/i.test(err?.detail || "");
+  if (isTransientSpotifyStatus(err?.status) || err?.code === "spotify-temp" || err?.code === "network") {
+    return "transient";
+  }
+  const deviceMissing =
+    err?.code === "no-device" ||
+    err?.reason === "NO_ACTIVE_DEVICE" ||
+    /no active device/i.test(`${err?.detail || ""} ${err?.message || ""}`);
+  if (deviceMissing) return "device";
   if ((err?.status === 404 && !deviceMissing) || err?.code === "forbidden") return "playlist";
   if (err?.status === 400) return "offset";
   return "";
@@ -461,6 +470,7 @@ export async function playViaPlaylist(playlistInput, target, deviceId) {
     const body = { context_uri: parsed.uri, offset, position_ms: positionMs };
     note(`Sende (${label}): PUT ${playPath} · Body=${JSON.stringify(body)}`);
     await api("PUT", playPath, body);
+    note(`Play angenommen mit position_ms=${positionMs}`);
     return Date.now();
   };
 
@@ -472,6 +482,8 @@ export async function playViaPlaylist(playlistInput, target, deviceId) {
     acceptedAt = await sendPlay(offset, offset.uri ? "uri" : "position");
   } catch (err) {
     const kind = isPlayRejected(err);
+    if (kind === "transient") throw err;
+    if (kind === "device") throw err;
     if (kind === "playlist") throw playlistForbidden(err);
     if (kind === "offset" && offset.uri && playlistIndex != null) {
       note("Entscheidung: offset.uri abgelehnt – versuche offset.position laut Songliste");
@@ -479,7 +491,9 @@ export async function playViaPlaylist(playlistInput, target, deviceId) {
       try {
         acceptedAt = await sendPlay(offset, "position");
       } catch (again) {
-        if (isPlayRejected(again) === "playlist") throw playlistForbidden(again);
+        const againKind = isPlayRejected(again);
+        if (againKind === "transient" || againKind === "device") throw again;
+        if (againKind === "playlist") throw playlistForbidden(again);
         note("Entscheidung: offset.position ebenfalls abgelehnt – Song nicht verfügbar");
         throw trackUnavailable(again);
       }
@@ -494,11 +508,12 @@ export async function playViaPlaylist(playlistInput, target, deviceId) {
   const first = await confirmPlayback(expected, deviceId, "Prüfung 1");
   if (first) return { acceptedAt, retried: false, state: first, offset };
 
-  note("Entscheidung: nach 3 s nichts oder falscher Song – Play maximal einmal wiederholen");
+  note("Entscheidung: nach 3 s nichts oder falscher Song – Play maximal einmal wiederholen (Gerät unverändert, kein Transfer)");
   try {
     acceptedAt = await sendPlay(offset, "wiederholt");
   } catch (err) {
     const kind = isPlayRejected(err);
+    if (kind === "transient" || kind === "device") throw err;
     if (kind === "playlist") throw playlistForbidden(err);
     if (kind === "offset") {
       note("Entscheidung: Wiederholung abgelehnt – Song nicht verfügbar");
@@ -515,7 +530,9 @@ export async function playViaPlaylist(playlistInput, target, deviceId) {
     try {
       acceptedAt = await sendPlay(offset, "position-fallback");
     } catch (err) {
-      if (isPlayRejected(err) === "playlist") throw playlistForbidden(err);
+      const kind = isPlayRejected(err);
+      if (kind === "transient" || kind === "device") throw err;
+      if (kind === "playlist") throw playlistForbidden(err);
       note("Entscheidung: offset.position fehlgeschlagen – Song nicht verfügbar");
       throw trackUnavailable(err);
     }
@@ -657,7 +674,40 @@ function matchPlaybackTrack(state, expected) {
 }
 
 async function inspectPlayback(expected, deviceId, label) {
-  const state = await checkPlayback(label);
+  let state = null;
+  try {
+    state = await getPlayback();
+  } catch (err) {
+    const transient = isTransientSpotifyStatus(err?.status) || err?.code === "spotify-temp" || err?.code === "network";
+    note(`${label}: Stand nicht lesbar (${err?.status || err?.code || "Fehler"}) – Gerät unverändert`, {
+      status: err?.status || "error",
+    });
+    return {
+      state: null,
+      match: { match: false, how: "nicht lesbar" },
+      rightDevice: true,
+      unreadable: true,
+      transient,
+    };
+  }
+  if (!state) {
+    note(`${label}: GET /me/player → nichts aktiv (HTTP 204)`, { status: "leer" });
+    return {
+      state: null,
+      match: { match: false, how: "kein Stand" },
+      rightDevice: true,
+      unreadable: false,
+      transient: false,
+    };
+  }
+  const bits = [
+    `item.uri=${state.uri || "–"}`,
+    state.linkedFromUri ? `linked_from=${state.linkedFromUri}` : "",
+    `is_playing=${state.isPlaying}`,
+    `Gerät=${state.deviceName || "–"}`,
+    `progress=${Math.round(state.progressMs / 1000)}s`,
+  ].filter(Boolean);
+  note(`${label}: ${bits.join(" · ")}`, { status: state.isPlaying ? "spielt" : "steht" });
   const match = matchPlaybackTrack(state, expected);
   const rightDevice = !state?.deviceId || state.deviceId === deviceId;
   note(
@@ -666,11 +716,12 @@ async function inspectPlayback(expected, deviceId, label) {
     } · Gerät ${rightDevice ? "ok" : "anderes"}`,
     { status: match.match && state?.isPlaying ? "ok" : "offen" }
   );
-  return { state, match, rightDevice };
+  return { state, match, rightDevice, unreadable: false, transient: false };
 }
 
 /**
  * Nach Play prüfen: richtiger Song reicht auch ohne is_playing (Puffern).
+ * Lesefehler oder Serverfehler lösen kein erneutes Play aus (Gerät bleibt).
  * Nur null, wenn nach 3 s nichts oder ein falscher Song läuft.
  */
 async function confirmPlayback(expected, deviceId, label) {
@@ -682,7 +733,9 @@ async function confirmPlayback(expected, deviceId, label) {
     note(`${label}: Entscheidung = läuft – kein erneutes Play`);
     return last.state;
   }
-  if (last.match.match && !last.state?.isPlaying) {
+  if (last.unreadable) {
+    note(`${label}: Stand nicht lesbar – bis 3 s weiterlesen, kein Play, kein Transfer`);
+  } else if (last.match.match && !last.state?.isPlaying) {
     note(`${label}: richtiger Song, is_playing=false (Puffern) – bis 3 s warten, kein Play`);
   } else if (!last.state) {
     note(`${label}: nichts aktiv – bis 3 s warten, dann ggf. einmal neu starten`);
@@ -701,9 +754,15 @@ async function confirmPlayback(expected, deviceId, label) {
     }
     if (last.match.match && !last.state?.isPlaying) {
       note(`${label}: immer noch Puffern`);
+    } else if (last.unreadable) {
+      note(`${label}: Stand weiter nicht lesbar`);
     }
   }
 
+  if (last.unreadable) {
+    note(`${label}: Entscheidung = Stand nicht lesbar – Play war angenommen, kein erneutes Play, kein Seek-Zwang`);
+    return { unreadable: true, progressMs: NaN, durationMs: 0, isPlaying: true };
+  }
   if (last.match.match && last.rightDevice) {
     note(
       `${label}: Entscheidung = richtiger Song (is_playing=${last.state?.isPlaying ? "ja" : "nein"}) – kein erneutes Play`
@@ -758,59 +817,88 @@ async function api(method, path, body) {
     headers["Content-Type"] = "application/json";
     options.body = JSON.stringify(body);
   }
-  let response;
-  try {
-    response = await fetch(`${API_URL}${path}`, options);
-  } catch (err) {
-    console.error("[spotify] API", err);
-    pushDiagnose({ method, path, status: "network", message: "Keine Verbindung zu Spotify." });
-    throw new SpotifyError("network", "Keine Verbindung zu Spotify.", 0, { path });
-  }
 
-  let data = null;
-  let text = "";
-  if (response.status !== 204 && response.status !== 202) {
-    text = await response.text();
-    if (text) {
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = { raw: text };
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(`${API_URL}${path}`, options);
+    } catch (err) {
+      console.error("[spotify] API", err);
+      lastErr = new SpotifyError("network", "Keine Verbindung zu Spotify.", 0, { path });
+      if (attempt < 2) {
+        const wait = spotifyRetryDelayMs(0, attempt);
+        pushDiagnose({
+          method,
+          path,
+          status: "network",
+          message: `Keine Verbindung – erneuter Versuch in ${wait}ms (${attempt + 1}/2)`,
+        });
+        await sleep(wait);
+        continue;
+      }
+      pushDiagnose({ method, path, status: "network", message: "Keine Verbindung zu Spotify." });
+      throw lastErr;
+    }
+
+    let data = null;
+    let text = "";
+    if (response.status !== 204 && response.status !== 202) {
+      text = await response.text();
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = { raw: text };
+        }
       }
     }
-  }
 
-  const { reason, message } = readApiError(data);
-  const errDetail =
-    !response.ok && text
-      ? text.length <= 800
-        ? text
-        : `${text.slice(0, 800)}…`
-      : "";
-  const idlePause =
-    method === "PUT" &&
-    String(path).startsWith("/me/player/pause") &&
-    (response.status === 404 ||
-      reason === "RESTRICTION_VIOLATED" ||
-      /restriction violated/i.test(`${reason} ${message} ${text}`));
-  if (!idlePause) {
-    pushDiagnose({
-      method,
-      path,
-      status: response.status,
-      reason: response.ok ? "" : reason || (response.status === 403 ? "Forbidden" : ""),
-      message: response.ok
-        ? response.status === 204 || response.status === 202
-          ? "OK (kein Inhalt)"
-          : "OK"
-        : message || (response.status === 403 ? "Forbidden (403)" : `Fehler ${response.status}`),
-      detail: errDetail,
-    });
-  }
+    const { reason, message } = readApiError(data);
+    const errDetail =
+      !response.ok && text
+        ? text.length <= 800
+          ? text
+          : `${text.slice(0, 800)}…`
+        : "";
+    const idlePause =
+      method === "PUT" &&
+      String(path).startsWith("/me/player/pause") &&
+      (response.status === 404 ||
+        reason === "RESTRICTION_VIOLATED" ||
+        /restriction violated/i.test(`${reason} ${message} ${text}`));
+    const transient = isTransientSpotifyStatus(response.status);
+    const retryAfter = response.headers?.get?.("Retry-After") || "";
+    if (!idlePause) {
+      const retryNote =
+        !response.ok && transient && attempt < 2
+          ? ` – erneuter Versuch in ${spotifyRetryDelayMs(response.status, attempt, retryAfter)}ms`
+          : "";
+      pushDiagnose({
+        method,
+        path,
+        status: response.status,
+        reason: response.ok ? "" : reason || (response.status === 403 ? "Forbidden" : ""),
+        message: response.ok
+          ? response.status === 204 || response.status === 202
+            ? "OK (kein Inhalt)"
+            : "OK"
+          : `${message || (response.status === 403 ? "Forbidden (403)" : `Fehler ${response.status}`)}${retryNote}`,
+        detail: errDetail,
+      });
+    }
 
-  if (response.status === 204 || response.status === 202) return null;
-  if (!response.ok) throw fromApiError(response.status, data, path, text);
-  return data;
+    if (response.status === 204 || response.status === 202) return null;
+    if (response.ok) return data;
+    if (transient && attempt < 2) {
+      await sleep(spotifyRetryDelayMs(response.status, attempt, retryAfter));
+      continue;
+    }
+    lastErr = fromApiError(response.status, data, path, text);
+    if (retryAfter) lastErr.retryAfter = retryAfter;
+    throw lastErr;
+  }
+  throw lastErr || new SpotifyError("api", "Spotify-Fehler.", 0, { path });
 }
 
 export async function getAccessToken() {
@@ -1002,7 +1090,23 @@ function fromApiError(status, data, path = "", rawText = "") {
       extras
     );
   }
-  if (status === 404 || reason === "NO_ACTIVE_DEVICE" || /no active device|no device/i.test(blob)) {
+  if (status === 429 || status === 500 || status === 502 || status === 503) {
+    return new SpotifyError(
+      "spotify-temp",
+      `Spotify ist kurz nicht erreichbar (${status}).`,
+      status,
+      extras
+    );
+  }
+  if (reason === "NO_ACTIVE_DEVICE" || /no active device/i.test(blob)) {
+    return new SpotifyError(
+      "no-device",
+      "Kein aktives Gerät (NO_ACTIVE_DEVICE). Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren.",
+      status,
+      extras
+    );
+  }
+  if (status === 404 && /\/me\/player(\/play)?(\?|$)/.test(path)) {
     return new SpotifyError(
       "no-device",
       "Kein aktives Gerät (NO_ACTIVE_DEVICE). Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren.",
