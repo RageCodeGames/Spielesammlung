@@ -87,7 +87,7 @@ export function confirmRoomExit(isHost) {
 }
 
 /** Dezentes ⋯-Menü zum Schließen/Verlassen während des Spiels. */
-export function appendRoomMenu(parent, { isHost, onExit }) {
+export function appendRoomMenu(parent, { isHost, onExit, extra = [] }) {
   if (!parent) return;
   const box = el("div", "room-menu");
   const toggle = el("button", "btn room-menu-btn", "⋯");
@@ -125,6 +125,16 @@ export function appendRoomMenu(parent, { isHost, onExit }) {
     onExit?.();
   });
   pop.append(action);
+  for (const item of extra) {
+    if (!item?.label) continue;
+    const more = el("button", "btn", item.label);
+    more.type = "button";
+    more.addEventListener("click", () => {
+      closePop();
+      item.onClick?.();
+    });
+    pop.append(more);
+  }
   box.append(toggle, pop);
   parent.append(box);
 }

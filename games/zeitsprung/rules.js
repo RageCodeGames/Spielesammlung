@@ -8,6 +8,7 @@ export const TOKEN_MAX = 5;
 export const SKIP_COST = 1;
 export const BUY_COST = 3;
 export const CHALLENGE_MS = 10_000;
+export const CHALLENGE_PLACE_MS = 15_000;
 export const DEFAULT_VARIANT_NAME = "Rock";
 export const DEV_NAMES = ["Nia", "Rolo", "Mira", "Timo", "Suri", "Kale", "Pim", "Vela", "Juno", "Pax"];
 export const CUE_MAX_AGE_MS = 20_000;

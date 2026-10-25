@@ -1,10 +1,10 @@
 import { get, set } from "../../shared/storage.js";
 import { FLIP_KEY } from "./rules.js";
 
-const FACE_DOWN_HOLD_MS = 220;
+const FACE_DOWN_HOLD_MS = 180;
 const NO_DATA_MS = 2000;
-const BETA_DOWN = 150;
-const Z_DOWN = -7;
+const BETA_DOWN = 140;
+const Z_FACE_DOWN = 6;
 
 export function flipPlayEnabled() {
   const stored = get(FLIP_KEY, null);
@@ -31,10 +31,21 @@ export function formatSensorLine(reading) {
   return { status, values: `β ${beta}° · γ ${gamma}° · z ${z}` };
 }
 
-function isFaceDown(beta, z) {
-  if (Number.isFinite(beta) && Math.abs(beta) > BETA_DOWN) return true;
-  if (!Number.isFinite(beta) && Number.isFinite(z) && z < Z_DOWN) return true;
-  return false;
+/**
+ * Display nach unten: |beta| groß (flach auf dem Display) oder z > 6
+ * (Beschleunigung aus dem Bildschirm heraus, Schwerkraft Richtung Boden).
+ */
+export function isFaceDown(beta, z) {
+  const byBeta = Number.isFinite(beta) && Math.abs(beta) > BETA_DOWN;
+  const byZ = Number.isFinite(z) && z > Z_FACE_DOWN;
+  return byBeta || byZ;
+}
+
+export function faceDownReason(beta, z) {
+  const parts = [];
+  if (Number.isFinite(beta) && Math.abs(beta) > BETA_DOWN) parts.push(`|β|=${Math.abs(beta).toFixed(0)}> ${BETA_DOWN}`);
+  if (Number.isFinite(z) && z > Z_FACE_DOWN) parts.push(`z=${z.toFixed(1)}>${Z_FACE_DOWN}`);
+  return parts.join(" · ") || "kein Schwellenwert";
 }
 
 async function requestSensorPermission() {
@@ -52,17 +63,17 @@ async function requestSensorPermission() {
     try {
       await Motion.requestPermission();
     } catch {
-      /* Orientierung reicht als Fallback */
+      /* Orientierung reicht */
     }
   }
   return true;
 }
 
 /**
- * Lagesensor: deviceorientation, sonst devicemotion (z stark negativ).
- * Kurze Haltezeit gegen Fehlauslösung. onNoData nach 2 s ohne Werte.
+ * Lagesensor: deviceorientation + devicemotion.
+ * Haltezeit startet einmal – nicht bei jedem Event neu.
  */
-export async function watchFaceDown({ onDown, onUp, onReading, onNoData } = {}) {
+export async function watchFaceDown({ onDown, onUp, onReading, onNoData, onFaceDown } = {}) {
   const hasOrient = typeof window.DeviceOrientationEvent === "function" || "ondeviceorientation" in window;
   const hasMotion = typeof window.DeviceMotionEvent === "function" || "ondevicemotion" in window;
   if (!hasOrient && !hasMotion) {
@@ -77,6 +88,7 @@ export async function watchFaceDown({ onDown, onUp, onReading, onNoData } = {}) 
   }
 
   let down = false;
+  let pending = null;
   let holdTimer = 0;
   let noDataTimer = 0;
   let beta;
@@ -86,25 +98,33 @@ export async function watchFaceDown({ onDown, onUp, onReading, onNoData } = {}) 
   let noDataSent = false;
 
   const emit = () => {
-    onReading?.({ live, beta, gamma, z });
+    onReading?.({ live, beta, gamma, z, down });
   };
 
   const consider = () => {
     const next = isFaceDown(beta, z);
     if (next === down) {
+      pending = null;
       if (holdTimer) {
         window.clearTimeout(holdTimer);
         holdTimer = 0;
       }
       return;
     }
+    if (pending === next) return;
+    pending = next;
     if (holdTimer) window.clearTimeout(holdTimer);
     holdTimer = window.setTimeout(() => {
       holdTimer = 0;
-      if (next === down) return;
-      down = next;
-      if (down) onDown?.();
-      else onUp?.();
+      pending = null;
+      if (isFaceDown(beta, z) === down) return;
+      down = isFaceDown(beta, z);
+      if (down) {
+        onFaceDown?.({ beta, z, reason: faceDownReason(beta, z) });
+        onDown?.();
+      } else {
+        onUp?.();
+      }
     }, FACE_DOWN_HOLD_MS);
   };
 

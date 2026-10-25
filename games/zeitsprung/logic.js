@@ -3,6 +3,7 @@ import { effectiveYear } from "./suspicious.js";
 import {
   BUY_COST,
   CHALLENGE_MS,
+  CHALLENGE_PLACE_MS,
   DEFAULT_VARIANT_NAME,
   GOAL_OPTIONS,
   SKIP_COST,
@@ -435,7 +436,19 @@ export function claimChallenge(state, fromId, at = Date.now()) {
   s.tokens[fromId] -= 1;
   s.challengerId = fromId;
   s.phase = "challenge-place";
-  s.challengeUntil = 0;
+  s.challengeGap = null;
+  s.challengeUntil = Date.now() + CHALLENGE_PLACE_MS;
+  return { state: s };
+}
+
+export function aimChallenge(state, fromId, gap) {
+  const s = migrateState(state);
+  if (s.phase !== "challenge-place") return { error: "not-now" };
+  if (fromId !== s.challengerId) return { error: "not-challenger" };
+  const cards = readArray(s.timelines[s.activeId]);
+  const g = Math.max(0, Math.min(cards.length, Math.floor(Number(gap) || 0)));
+  if (g === s.proposedGap) return { error: "same-gap" };
+  s.challengeGap = g;
   return { state: s };
 }
 
@@ -453,7 +466,7 @@ export function challengePlace(state, secrets, fromId, gap) {
 
 export function expireChallenge(state, secrets, now = Date.now()) {
   const s = migrateState(state);
-  if (s.phase !== "challenge") return { error: "not-now" };
+  if (s.phase !== "challenge" && s.phase !== "challenge-place") return { error: "not-now" };
   if (s.challengeUntil && now < s.challengeUntil) return { error: "wait" };
   return resolvePlacement(s, normalizeSecrets(secrets));
 }

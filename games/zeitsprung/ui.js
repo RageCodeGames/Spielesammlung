@@ -5,13 +5,17 @@ import { initUpdates } from "../../shared/update.js";
 import {
   completeLoginIfRedirected,
   explainError,
+  formatDiagnoseLine,
+  getDiagnoseLog,
   getStoredSession,
   isConfigured,
+  logDiagnose,
   login,
   logout,
 } from "../../shared/spotify.js";
 import { showImport } from "./import-ui.js";
 import {
+  aimChallenge,
   awardTitle,
   beginMatch,
   buyCard,
@@ -21,7 +25,7 @@ import {
   dropPlayer,
   expireChallenge,
   finishReveal,
-  gapOk,
+  firstValidGap,
   migrateState,
   mixCatalogs,
   normalizeSecrets,
@@ -35,6 +39,7 @@ import {
   summarizeSettings,
   tapCard,
 } from "./logic.js";
+import { bindTimelineDrag } from "./drag.js";
 import { flipPlayEnabled, formatSensorLine, setFlipPlayEnabled, watchFaceDown } from "./flip.js";
 import {
   chooseDevice,
@@ -85,9 +90,10 @@ let pendingCue = null;
 let selectedGap = null;
 let sleepHint = "";
 let sensorReading = { live: false, beta: null, gamma: null, z: null };
-let sensorOpen = false;
 let sensorNoData = false;
 let lastHandledCue = "";
+let lastAimedGap = null;
+let dragStop = null;
 
 initUpdates();
 
@@ -562,6 +568,7 @@ function beginPlay(room) {
     entering = false;
     onlineRoom = room;
     if (room?.state) state = migrateState(room.state);
+    if (state?.phase === "listen" && state.cue) pendingCue = state.cue;
     syncOrientation();
     requestWakeLock();
     clearSubs();
@@ -612,7 +619,12 @@ function beginPlay(room) {
 function adoptState(next) {
   const prevCue = state?.cue?.cueId;
   const prevPhase = state?.phase;
-  if (next?.phase !== prevPhase) selectedGap = null;
+  if (next?.phase !== prevPhase) {
+    selectedGap = null;
+    lastAimedGap = null;
+  }
+  if (next?.phase === "listen" && next.cue) pendingCue = next.cue;
+  else if (next?.phase !== "listen") pendingCue = null;
   state = next;
   syncOrientation();
   renderPlay();
@@ -621,7 +633,6 @@ function adoptState(next) {
   if (next?.cue?.cueId && next.cue.cueId !== prevCue) handleIncomingCue(next.cue);
   else if (!next?.cue || next.phase !== "listen") {
     pauseLocal();
-    if (next?.phase !== "listen") pendingCue = null;
   }
 }
 
@@ -637,6 +648,7 @@ function handleAction(action) {
     else if (action.type === "skip") next = skipSong(state, secrets, from);
     else if (action.type === "buy") next = buyCard(state, secrets, from);
     else if (action.type === "challenge") next = claimChallenge(state, from);
+    else if (action.type === "challenge-aim") next = aimChallenge(state, from, p.gap);
     else if (action.type === "challenge-place") next = challengePlace(state, secrets, from, p.gap);
     else if (action.type === "award") next = awardTitle(state, from, onlineRoom?.hostId);
     else if (action.type === "next") next = finishReveal(state, secrets);
@@ -686,7 +698,7 @@ function armTick() {
 
 async function hostTick() {
   if (!iAmHost() || !state || state.waitingForHost) return;
-  if (state.phase === "challenge") {
+  if (state.phase === "challenge" || state.phase === "challenge-place") {
     const next = expireChallenge(state, secrets, Date.now());
     if (!next.error) await publish(next.state, next.secrets);
   }
@@ -694,7 +706,7 @@ async function hostTick() {
 
 function patchTimers() {
   const node = app.querySelector("[data-challenge-timer]");
-  if (!node || state?.phase !== "challenge") return;
+  if (!node || (state?.phase !== "challenge" && state?.phase !== "challenge-place")) return;
   const left = Math.max(0, Math.ceil((state.challengeUntil - Date.now()) / 1000));
   node.textContent = `${left}s`;
 }
@@ -723,9 +735,23 @@ function patchSensorHud() {
   if (values) values.textContent = line.values;
 }
 
+function listeningCue() {
+  if (state?.phase !== "listen") return null;
+  return state?.cue || pendingCue || null;
+}
+
 function playPendingCue() {
-  if (!pendingCue || isMuted()) return;
-  playCue(pendingCue, {
+  const cue = listeningCue() || pendingCue;
+  if (!cue) {
+    logDiagnose("Abspielen nicht: kein Cue lokal");
+    return;
+  }
+  if (isMuted()) {
+    logDiagnose("Abspielen nicht: Gerät ist stumm");
+    return;
+  }
+  logDiagnose("Abspielen ausgelöst");
+  playCue(cue, {
     onSleep: (msg) => {
       sleepHint = msg;
       renderPlay();
@@ -744,8 +770,26 @@ async function startFlipWatch() {
   sensorReading = { live: false, beta: null, gamma: null, z: null };
   try {
     const watch = await watchFaceDown({
+      onFaceDown: ({ reason }) => {
+        logDiagnose(`Display nach unten erkannt (${reason})`);
+      },
       onDown: () => {
-        if (!flipPlayEnabled() || state?.phase !== "listen") return;
+        if (!flipPlayEnabled()) {
+          logDiagnose("Abspielen nicht: Umdrehen ist aus");
+          return;
+        }
+        if (state?.phase !== "listen") {
+          logDiagnose(`Abspielen nicht: Phase ist ${state?.phase || "keine"}`);
+          return;
+        }
+        if (isMuted()) {
+          logDiagnose("Abspielen nicht: Gerät ist stumm");
+          return;
+        }
+        if (!listeningCue() && !pendingCue) {
+          logDiagnose("Abspielen nicht: Cue liegt noch nicht vor");
+          return;
+        }
         playPendingCue();
       },
       onUp: () => {
@@ -759,7 +803,7 @@ async function startFlipWatch() {
       },
       onNoData: () => {
         sensorNoData = true;
-        renderPlay();
+        logDiagnose("Keine Sensordaten – Abspielen-Knopf nutzen");
       },
     });
     flipWatch = watch;
@@ -777,12 +821,15 @@ async function startFlipWatch() {
 }
 
 async function handleIncomingCue(cue) {
-  if (!cue?.cueId || cue.cueId === lastHandledCue) return;
-  lastHandledCue = cue.cueId;
+  if (!cue?.cueId) return;
   pendingCue = cue;
+  const fresh = cue.cueId !== lastHandledCue;
+  if (fresh) lastHandledCue = cue.cueId;
+  renderPlay();
   if (isMuted()) return;
-  await startFlipWatch();
-  if (!flipPlayEnabled()) {
+  startFlipWatch();
+  if (fresh && !flipPlayEnabled()) {
+    logDiagnose("Cue empfangen – starte ohne Umdrehen");
     await playCue(cue, {
       onSleep: (msg) => {
         sleepHint = msg;
@@ -790,7 +837,6 @@ async function handleIncomingCue(cue) {
       },
     });
   }
-  renderPlay();
 }
 
 function scheduleBots() {
@@ -831,7 +877,7 @@ async function runBots() {
   }
   if (state.phase === "challenge") {
     const foe = dummies.find((p) => p.id !== state.activeId && (state.tokens[p.id] || 0) > 0);
-    if (foe && Math.random() < 0.35) {
+    if (foe && Math.random() < 0.7) {
       const next = claimChallenge(state, foe.id);
       if (!next.error) await publish(next.state, null);
       return;
@@ -840,9 +886,12 @@ async function runBots() {
   if (state.phase === "challenge-place") {
     const ch = state.players.find((p) => p.id === state.challengerId);
     if (ch?.dummy) {
+      const year = secrets.current?.year;
       const n = (state.timelines[state.activeId] || []).length;
-      let gap = Math.floor(Math.random() * (n + 1));
+      let gap = year != null ? firstValidGap(state.timelines[state.activeId], year) : Math.floor(Math.random() * (n + 1));
       if (gap === state.proposedGap) gap = (gap + 1) % (n + 1);
+      const aimed = aimChallenge(state, ch.id, gap);
+      if (!aimed.error) await publish(aimed.state, null);
       const next = challengePlace(state, secrets, ch.id, gap);
       if (!next.error) await publish(next.state, next.secrets);
       return;
@@ -875,39 +924,52 @@ function tokenStrip() {
   const row = el("div", "zs-tokens");
   for (const player of state.players) {
     const item = el("span", player.id === state.activeId ? "zs-token is-on" : "zs-token");
-    item.textContent = `${player.name} · ${state.tokens[player.id] || 0}`;
+    const extra = player.id === state.challengerId ? " !" : "";
+    item.textContent = `${player.name} · ${state.tokens[player.id] || 0}${extra}`;
     row.append(item);
   }
   return row;
 }
 
-function timelineRow(cards, { ownerId, interactive, highlightGap, foreign }) {
+function pickGap(gap) {
+  if (gap == null) return;
+  if (state.phase === "challenge-place" && gap === state.proposedGap) return;
+  selectedGap = gap;
+  if (state.phase === "challenge-place" && myId() === state.challengerId && gap !== lastAimedGap) {
+    lastAimedGap = gap;
+    send("challenge-aim", { gap });
+  }
+  renderPlay();
+}
+
+function confirmPlace() {
+  if (selectedGap == null) return;
+  if (state.phase === "challenge-place") send("challenge-place", { gap: selectedGap });
+  else send("place", { gap: selectedGap });
+  selectedGap = null;
+}
+
+function timelineRow(cards, { ownerId, interactive, highlightGap, aimGap, lockedGap, mine }) {
   const box = el("div", "zs-tl-box");
-  const wrap = el("div", `zs-tl${foreign ? " is-foreign" : ""}`);
-  wrap.setAttribute(foreign ? "data-foreign-tl" : "data-my-tl", "1");
+  const wrap = el("div", `zs-tl${mine ? "" : " is-foreign"}`);
+  wrap.setAttribute(mine ? "data-my-tl" : "data-work-tl", "1");
   const list = readCards(cards);
-  const picker = interactive && (state.phase === "listen" || state.phase === "challenge-place");
-  const placeGap = (gap) => {
-    selectedGap = gap;
-    renderPlay();
-  };
-  const confirm = () => {
-    if (selectedGap == null) return;
-    if (state.phase === "challenge-place") send("challenge-place", { gap: selectedGap });
-    else send("place", { gap: selectedGap });
-    selectedGap = null;
-  };
+  const picker = interactive;
   const addGap = (g) => {
-    const gap = el("button", `zs-gap${selectedGap === g ? " is-on" : ""}`, "▾");
+    const locked = lockedGap === g;
+    const gap = el("button", "zs-gap", locked ? "●" : "▾");
     gap.type = "button";
-    gap.title = "Hier einsortieren";
-    if (!picker) {
+    gap.setAttribute("data-gap", String(g));
+    gap.title = locked ? "Gewählte Lücke" : "Hier einsortieren";
+    if (!picker || locked) {
       gap.disabled = true;
-      gap.classList.add("is-idle");
+      gap.classList.add(locked ? "is-lock" : "is-idle");
     } else {
-      gap.addEventListener("click", () => placeGap(g));
+      gap.addEventListener("click", () => pickGap(g));
     }
+    if (selectedGap === g) gap.classList.add("is-on");
     if (highlightGap === g) gap.classList.add("is-pick");
+    if (aimGap === g) gap.classList.add("is-aim");
     wrap.append(gap);
   };
   addGap(0);
@@ -916,14 +978,6 @@ function timelineRow(cards, { ownerId, interactive, highlightGap, foreign }) {
     addGap(i + 1);
   });
   box.append(wrap);
-  if (picker) {
-    const go = el("button", "btn primary zs-lock", "Festlegen");
-    go.type = "button";
-    go.disabled = selectedGap == null;
-    if (state.phase === "challenge-place" && selectedGap === state.proposedGap) go.disabled = true;
-    go.addEventListener("click", confirm);
-    box.append(go);
-  }
   void ownerId;
   return box;
 }
@@ -943,47 +997,70 @@ function cardNode(card) {
 function vinylButton() {
   const btn = el("button", "zs-vinyl");
   btn.type = "button";
-  btn.setAttribute("aria-label", "Songkarte umdrehen");
+  btn.setAttribute("aria-label", "Songkarte");
+  btn.setAttribute("data-drag-label", "?");
   btn.append(el("span", "zs-vinyl-q", "?"));
   const mine = myId() === state.activeId;
   if (mine && state.phase === "turn" && !state.played) {
     btn.addEventListener("click", () => send("play-card"));
-  } else {
-    btn.disabled = true;
   }
   return btn;
 }
 
+function challengeMarker() {
+  const btn = el("button", "zs-marker");
+  btn.type = "button";
+  btn.setAttribute("aria-label", "Herausforderungs-Marke");
+  btn.setAttribute("data-drag-label", "▾");
+  btn.textContent = "▾";
+  return btn;
+}
+
 function playFallbackButton() {
-  if (isMuted() || !pendingCue) return null;
+  if (isMuted()) return null;
   if (state.phase !== "listen") return null;
+  if (!listeningCue()) return null;
   const playBtn = el("button", "btn primary", "Abspielen");
   playBtn.type = "button";
   playBtn.addEventListener("click", () => playPendingCue());
   return playBtn;
 }
 
-function sensorPanel() {
+function showDiagnose() {
+  document.querySelector(".zs-diag-back")?.remove();
+  const back = el("div", "zs-diag-back");
+  const dialog = el("div", "zs-diag");
+  dialog.setAttribute("role", "dialog");
   const line = formatSensorLine(sensorReading);
-  const box = el("details", "zs-sensor");
-  box.open = sensorOpen;
-  box.addEventListener("toggle", () => {
-    sensorOpen = box.open;
-  });
-  const summary = el("summary", "zs-sensor-summary");
-  const status = el("span", "", `Sensor: ${line.status}`);
-  status.setAttribute("data-sensor-status", "1");
-  summary.append(status);
-  box.append(summary);
-  const values = el("p", "zs-sensor-values", line.values);
-  values.setAttribute("data-sensor-values", "1");
-  box.append(values);
+  dialog.append(el("h2", "", "Diagnose"));
+  dialog.append(el("p", "", `Sensor: ${line.status}`));
+  dialog.append(el("p", "zs-sensor-values", line.values));
   if (sensorNoData) {
-    box.append(
-      el("p", "note", "Dein Browser liefert keine Sensordaten – nutze den Abspielen-Knopf")
-    );
+    dialog.append(el("p", "note", "Dein Browser liefert keine Sensordaten – nutze den Abspielen-Knopf"));
   }
-  return box;
+  const flipRow = el("label", "switch-row");
+  const flip = document.createElement("input");
+  flip.type = "checkbox";
+  flip.checked = flipPlayEnabled();
+  flip.addEventListener("change", () => {
+    setFlipPlayEnabled(flip.checked);
+    if (!flip.checked && listeningCue() && !isMuted()) playPendingCue();
+  });
+  flipRow.append(flip, el("span", "", "Umdrehen zum Abspielen"));
+  dialog.append(flipRow);
+  const log = el("pre", "zs-diag-log");
+  const rows = getDiagnoseLog();
+  log.textContent = rows.length ? rows.slice(0, 24).map(formatDiagnoseLine).join("\n") : "Noch keine Einträge.";
+  dialog.append(log);
+  const close = el("button", "btn primary", "Schließen");
+  close.type = "button";
+  close.addEventListener("click", () => back.remove());
+  dialog.append(close);
+  back.addEventListener("click", (event) => {
+    if (event.target === back) back.remove();
+  });
+  back.append(dialog);
+  document.body.append(back);
 }
 
 function renderPlay() {
@@ -995,12 +1072,21 @@ function renderPlay() {
   const me = myId();
   const mine = state.timelines?.[me] || [];
   const active = playerName(state, state.activeId);
-  const scroll = app.querySelector("[data-my-tl]")?.scrollLeft || 0;
+  const scrollMine = app.querySelector("[data-my-tl]")?.scrollLeft || 0;
+  const scrollWork = app.querySelector("[data-work-tl]")?.scrollLeft || 0;
+  dragStop?.();
+  dragStop = null;
 
   muteControl?.destroy();
   const view = el("section", "screen zs-play");
   const topbar = el("div", "zs-bar");
-  if (lobbyTools) lobbyTools.appendRoomMenu(topbar, { isHost: iAmHost(), onExit: askLeaveRoom });
+  if (lobbyTools) {
+    lobbyTools.appendRoomMenu(topbar, {
+      isHost: iAmHost(),
+      onExit: askLeaveRoom,
+      extra: [{ label: "Diagnose", onClick: showDiagnose }],
+    });
+  }
   const tools = el("div", "zs-bar-tools");
   muteControl = mountMuteButton(tools, {
     onMute: pauseLocal,
@@ -1014,35 +1100,37 @@ function renderPlay() {
 
   const board = el("div", "zs-board");
   const upper = el("div", "zs-upper");
-  upper.append(tokenStrip());
-  if (sleepHint) upper.append(el("p", "spotify-sleep-hint", sleepHint));
+  const side = el("div", "zs-side");
+  side.append(tokenStrip());
+  const center = el("div", "zs-center");
+  const actions = el("div", "zs-actions");
+  if (sleepHint) center.append(el("p", "spotify-sleep-hint", sleepHint));
 
-  if (state.phase === "end") {
-    const win = playerName(state, state.winnerId);
-    upper.append(el("h1", "zs-win", `${win} gewinnt`));
+  const phase = state.phase;
+  const inChallenge = phase === "challenge" || phase === "challenge-place";
+  let vinyl = null;
+  let marker = null;
+
+  if (phase === "end") {
+    center.append(el("h1", "zs-win", `${playerName(state, state.winnerId)} gewinnt`));
     if (iAmHost()) {
       const again = el("button", "btn primary", "Nochmal");
       again.type = "button";
       again.addEventListener("click", () => send("rematch"));
-      upper.append(again);
+      actions.append(again);
     }
-    for (const player of state.players) {
-      upper.append(el("h2", "lobby-list-title", player.name));
-      upper.append(timelineRow(state.timelines[player.id], { ownerId: player.id, interactive: false, foreign: true }));
-    }
-  } else if (state.phase === "reveal") {
+  } else if (phase === "reveal") {
     const r = state.reveal || {};
-    upper.append(el("p", "zs-reveal-title", r.title || ""));
-    upper.append(el("p", "zs-reveal-meta", `${r.artist || ""} · ${r.year || ""}`));
+    center.append(el("p", "zs-reveal-title", r.title || ""));
+    center.append(el("p", "zs-reveal-meta", `${r.artist || ""} · ${r.year || ""}`));
     const how =
       r.result === "keep"
         ? `${active} behält die Karte.`
         : r.result === "steal"
           ? `${playerName(state, r.holderId)} übernimmt die Karte.`
           : "Die Karte wird abgelegt.";
-    upper.append(el("p", "lead", how));
+    center.append(el("p", "lead", how));
     if (iAmHost()) {
-      const row = el("div", "btn-row");
       const award = el("button", "btn", "Titel & Interpret richtig");
       award.type = "button";
       award.disabled = state.awarded;
@@ -1050,99 +1138,124 @@ function renderPlay() {
       const next = el("button", "btn primary", "Weiter");
       next.type = "button";
       next.addEventListener("click", () => send("next"));
-      row.append(award, next);
-      upper.append(row);
+      actions.append(award, next);
     }
-  } else if (state.phase === "challenge" || state.phase === "challenge-place") {
-    upper.append(el("p", "lead", `${active} hat gelegt`));
-    if (state.phase === "challenge") {
-      const t = el("strong", "", "");
-      t.setAttribute("data-challenge-timer", "1");
-      const left = Math.max(0, Math.ceil((state.challengeUntil - Date.now()) / 1000));
-      t.textContent = `${left}s`;
-      upper.append(t);
-      if (me !== state.activeId && (state.tokens[me] || 0) > 0 && !state.challengerId) {
-        const ch = el("button", "btn primary", "Herausfordern");
-        ch.type = "button";
-        ch.addEventListener("click", () => send("challenge"));
-        upper.append(ch);
-      } else if (me !== state.activeId) {
-        upper.append(el("p", "note", "Warten …"));
+  } else if (inChallenge) {
+    center.append(el("p", "lead", `${active} hat gelegt`));
+    const t = el("strong", "", "");
+    t.setAttribute("data-challenge-timer", "1");
+    const left = Math.max(0, Math.ceil((state.challengeUntil - Date.now()) / 1000));
+    t.textContent = `${left}s`;
+    center.append(t);
+    if (phase === "challenge-place") {
+      center.append(el("p", "note", `${playerName(state, state.challengerId)} fordert heraus`));
+      if (state.challengeGap != null) {
+        center.append(el("p", "note", `Lücke ${Number(state.challengeGap) + 1}`));
       }
-    } else {
-      upper.append(el("p", "note", `${playerName(state, state.challengerId)} legt eine andere Lücke fest.`));
     }
-    const chPlace = me === state.challengerId && state.phase === "challenge-place";
-    upper.append(
+    if (phase === "challenge" && me !== state.activeId && (state.tokens[me] || 0) > 0 && !state.challengerId) {
+      const ch = el("button", "btn primary", "Herausfordern");
+      ch.type = "button";
+      ch.addEventListener("click", () => send("challenge"));
+      actions.append(ch);
+    }
+    if (phase === "challenge-place" && me === state.challengerId) {
+      marker = challengeMarker();
+      center.append(marker);
+      const go = el("button", "btn primary zs-lock", "Festlegen");
+      go.type = "button";
+      go.disabled = selectedGap == null || selectedGap === state.proposedGap;
+      go.addEventListener("click", confirmPlace);
+      actions.append(go);
+    }
+  } else {
+    center.append(el("p", "lead", me === state.activeId ? "Du bist dran" : `${active} ist dran`));
+    vinyl = vinylButton();
+    center.append(vinyl);
+    const playBtn = playFallbackButton();
+    if (playBtn) actions.append(playBtn);
+    if (me === state.activeId) {
+      if (phase === "listen") {
+        const go = el("button", "btn primary zs-lock", "Festlegen");
+        go.type = "button";
+        go.disabled = selectedGap == null;
+        go.addEventListener("click", confirmPlace);
+        actions.append(go);
+      }
+      const skip = el("button", "btn", "Überspringen");
+      skip.type = "button";
+      skip.disabled = (state.tokens[me] || 0) < 1;
+      skip.addEventListener("click", () => send("skip"));
+      const buy = el("button", "btn", "Kaufen");
+      buy.type = "button";
+      buy.disabled = (state.tokens[me] || 0) < 3;
+      buy.addEventListener("click", () => send("buy"));
+      actions.append(skip, buy);
+    }
+  }
+
+  upper.append(side, center, actions);
+
+  const lower = el("div", "zs-lower");
+  if (phase === "end") {
+    const strip = el("div", "zs-end-strip");
+    for (const player of state.players) {
+      const block = el("div", "zs-end-one");
+      block.append(el("p", "zs-mine-label", player.name));
+      block.append(
+        timelineRow(state.timelines[player.id], {
+          ownerId: player.id,
+          interactive: false,
+          mine: player.id === me,
+        })
+      );
+      strip.append(block);
+    }
+    lower.append(strip);
+  } else if (inChallenge) {
+    const chPlace = me === state.challengerId && phase === "challenge-place";
+    lower.append(el("p", "zs-mine-label", `Zeitleiste von ${active}`));
+    lower.append(
       timelineRow(state.timelines[state.activeId], {
         ownerId: state.activeId,
         interactive: chPlace,
-        foreign: true,
         highlightGap: state.proposedGap,
+        aimGap: state.challengeGap,
+        lockedGap: state.proposedGap,
+        mine: false,
       })
     );
-  } else if (me === state.activeId) {
-    upper.append(el("p", "lead", "Du bist dran"));
-    upper.append(vinylButton());
-    const fallback = playFallbackButton();
-    if (fallback) upper.append(fallback);
-    const spend = el("div", "btn-row");
-    const skip = el("button", "btn", "Überspringen (1 Token)");
-    skip.type = "button";
-    skip.disabled = (state.tokens[me] || 0) < 1;
-    skip.addEventListener("click", () => send("skip"));
-    const buy = el("button", "btn", "Karte kaufen (3 Tokens)");
-    buy.type = "button";
-    buy.disabled = (state.tokens[me] || 0) < 3;
-    buy.addEventListener("click", () => send("buy"));
-    spend.append(skip, buy);
-    upper.append(spend);
   } else {
-    upper.append(el("p", "lead", `${active} ist dran`));
-    upper.append(vinylButton());
-    const fallback = playFallbackButton();
-    if (fallback) upper.append(fallback);
-    upper.append(timelineRow(state.timelines[state.activeId], { ownerId: state.activeId, interactive: false, foreign: true }));
+    lower.append(el("p", "zs-mine-label", "Deine Zeitleiste"));
+    lower.append(
+      timelineRow(mine, {
+        ownerId: me,
+        interactive: me === state.activeId && phase === "listen",
+        mine: true,
+      })
+    );
   }
-
-  if (state.phase !== "end") {
-    const flipRow = el("label", "switch-row zs-flip");
-    const flip = document.createElement("input");
-    flip.type = "checkbox";
-    flip.checked = flipPlayEnabled();
-    flip.addEventListener("change", () => {
-      setFlipPlayEnabled(flip.checked);
-      if (!flip.checked && pendingCue && state.phase === "listen" && !isMuted()) {
-        playCue(pendingCue, {
-          onSleep: (msg) => {
-            sleepHint = msg;
-            renderPlay();
-          },
-        });
-      }
-    });
-    flipRow.append(flip, el("span", "", "Umdrehen zum Abspielen"));
-    upper.append(flipRow);
-    upper.append(sensorPanel());
-  }
-
-  const lower = el("div", "zs-lower");
-  lower.append(el("p", "zs-mine-label", "Deine Zeitleiste"));
-  const canPlace = me === state.activeId && state.phase === "listen";
-  lower.append(
-    timelineRow(mine, {
-      ownerId: me,
-      interactive: canPlace,
-      foreign: false,
-    })
-  );
 
   board.append(upper, lower);
   view.append(board);
   app.replaceChildren(view);
-  const tl = app.querySelector("[data-my-tl]");
-  if (tl) tl.scrollLeft = scroll;
+  const myTl = app.querySelector("[data-my-tl]");
+  if (myTl) myTl.scrollLeft = scrollMine;
+  const workTl = app.querySelector("[data-work-tl]");
+  if (workTl) workTl.scrollLeft = scrollWork;
   patchTimers();
+
+  const dragTl = app.querySelector("[data-my-tl], [data-work-tl]");
+  const canDragListen = vinyl && me === state.activeId && phase === "listen";
+  const canDragChallenge = marker && me === state.challengerId && phase === "challenge-place";
+  if (dragTl && (canDragListen || canDragChallenge)) {
+    dragStop = bindTimelineDrag({
+      source: canDragChallenge ? marker : vinyl,
+      timeline: dragTl,
+      lockedGap: canDragChallenge ? state.proposedGap : null,
+      onDrop: pickGap,
+    });
+  }
 }
 
 completeLoginIfRedirected()

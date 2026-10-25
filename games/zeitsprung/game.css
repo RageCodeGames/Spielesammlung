@@ -144,11 +144,13 @@ body.zeitsprung .zs-play {
   display: grid;
   grid-template-rows: auto 1fr;
   min-height: 0;
+  height: 100%;
   padding-top: max(0.45rem, var(--safe-top));
   padding-left: max(2.75rem, var(--safe-left));
   padding-right: max(0.75rem, var(--safe-right));
   padding-bottom: var(--safe-bottom);
-  overflow: visible;
+  overflow: hidden;
+  touch-action: manipulation;
 }
 
 body.zeitsprung .zs-bar {
@@ -178,25 +180,73 @@ body.zeitsprung .zs-board {
   overflow: hidden;
 }
 
-body.zeitsprung .zs-upper,
-body.zeitsprung .zs-lower {
+body.zeitsprung .zs-upper {
   min-height: 0;
   overflow: hidden;
-  padding: 0.25rem 0.65rem 0.5rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
+  padding: 0.15rem 0.4rem 0.25rem;
+  display: grid;
+  grid-template-columns: minmax(6.5rem, 22%) minmax(0, 1fr) minmax(7.2rem, 26%);
+  gap: 0.4rem;
+  align-items: stretch;
 }
 
 body.zeitsprung .zs-lower {
+  min-height: 0;
+  overflow: hidden;
+  padding: 0.2rem 0.4rem 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
   border-top: 1px solid rgba(244, 239, 230, 0.14);
+}
+
+body.zeitsprung .zs-side,
+body.zeitsprung .zs-center,
+body.zeitsprung .zs-actions {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.zeitsprung .zs-side {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+body.zeitsprung .zs-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  text-align: center;
+}
+
+body.zeitsprung .zs-center .lead,
+body.zeitsprung .zs-center .note {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+body.zeitsprung .zs-actions {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.3rem;
+}
+
+body.zeitsprung .zs-actions .btn {
+  width: 100%;
+  min-height: 44px;
+  padding: 0.3rem 0.45rem;
 }
 
 body.zeitsprung .zs-tokens {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  font-size: 0.82rem;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 0.25rem;
+  font-size: 0.78rem;
 }
 
 body.zeitsprung .zs-token {
@@ -229,6 +279,7 @@ body.zeitsprung .zs-tl {
   -webkit-overflow-scrolling: touch;
   min-height: 0;
   flex: 1;
+  touch-action: pan-x;
 }
 
 body.zeitsprung .zs-card {
@@ -276,10 +327,22 @@ body.zeitsprung .zs-gap.is-idle {
 }
 
 body.zeitsprung .zs-gap.is-on,
-body.zeitsprung .zs-gap.is-pick {
+body.zeitsprung .zs-gap.is-pick,
+body.zeitsprung .zs-gap.is-aim,
+body.zeitsprung .zs-gap.is-drop {
   border-color: var(--accent);
   color: var(--accent);
   background: rgba(227, 164, 74, 0.15);
+}
+
+body.zeitsprung .zs-gap.is-drop {
+  width: 2.6rem;
+  background: rgba(227, 164, 74, 0.35);
+}
+
+body.zeitsprung .zs-gap.is-lock {
+  opacity: 0.9;
+  border-style: solid;
 }
 
 body.zeitsprung .zs-lock {
@@ -289,8 +352,8 @@ body.zeitsprung .zs-lock {
 }
 
 body.zeitsprung .zs-vinyl {
-  width: 6.4rem;
-  height: 6.4rem;
+  width: 4.8rem;
+  height: 4.8rem;
   margin: 0 auto;
   border-radius: 50%;
   border: 0;
@@ -300,6 +363,15 @@ body.zeitsprung .zs-vinyl {
   display: grid;
   place-items: center;
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+  touch-action: none;
+  flex: 0 0 auto;
+}
+
+body.zeitsprung .zs-marker {
+  width: 2.4rem;
+  min-height: 2.4rem;
+  border-radius: 0.5rem;
+  touch-action: none;
 }
 
 body.zeitsprung .zs-vinyl-q {
@@ -329,25 +401,80 @@ body.zeitsprung .zs-mine-label {
   opacity: 0.75;
 }
 
-body.zeitsprung .zs-flip {
-  margin-top: auto;
-  font-size: 0.88rem;
-}
-
-body.zeitsprung .zs-sensor {
-  font-size: 0.78rem;
-  color: var(--muted);
-}
-
-body.zeitsprung .zs-sensor-summary {
-  cursor: pointer;
-  font-weight: 700;
-  color: var(--text);
-}
-
 body.zeitsprung .zs-sensor-values {
   margin: 0.2rem 0 0;
   font-variant-numeric: tabular-nums;
+}
+
+body.zeitsprung .zs-end-strip {
+  display: flex;
+  gap: 0.6rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 0;
+  flex: 1;
+}
+
+body.zeitsprung .zs-end-one {
+  flex: 0 0 auto;
+  width: min(70vw, 22rem);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+body.zeitsprung .zs-diag-back {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(8, 10, 16, 0.55);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+body.zeitsprung .zs-diag {
+  width: min(36rem, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  padding: 1rem;
+  border-radius: 1rem;
+  background: var(--surface);
+  display: grid;
+  gap: 0.55rem;
+}
+
+body.zeitsprung .zs-diag-log {
+  margin: 0;
+  max-height: 12rem;
+  overflow: auto;
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+}
+
+body.zs-dragging,
+body.zs-dragging * {
+  cursor: grabbing;
+  user-select: none;
+  touch-action: none;
+}
+
+.zs-drag-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 60;
+  width: 4.5rem;
+  height: 4.5rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 50%, #c9a36a 0 14%, #1a120e 15% 18%, #3b2a22 19% 72%, #0c0a09 73%);
+  color: #f4efe6;
+  font-weight: 800;
+  font-size: 1.4rem;
 }
 
 body.zeitsprung .zs-lobby-me {
@@ -366,10 +493,6 @@ body.zeitsprung .zs-play .switch-row {
 
 body.zeitsprung .zs-vinyl:disabled {
   opacity: 0.85;
-}
-
-body.zeitsprung .zs-upper {
-  overflow: auto;
 }
 
 body.zeitsprung .toast {
