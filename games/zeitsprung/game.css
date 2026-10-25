@@ -1,3 +1,12 @@
+html:has(body.zeitsprung),
+body.zeitsprung,
+body.zeitsprung #app {
+  background-color: var(--bg);
+  background-image:
+    radial-gradient(120% 55% at 50% -10%, var(--bg-glow) 0%, transparent 58%),
+    linear-gradient(var(--bg), var(--bg));
+}
+
 body.zeitsprung #app {
   padding-top: var(--safe-top);
   padding-left: var(--safe-left);
@@ -138,13 +147,15 @@ body.zeitsprung:has(.zs-play) #app {
   padding-top: 0;
   padding-left: 0;
   padding-right: 0;
+  padding-bottom: 0;
 }
 
 body.zeitsprung .zs-play {
-  --zs-bar: 1.85rem;
-  --zs-chrome: 28px;
-  --zs-btn: 32px;
-  --zs-btn-mini: 26px;
+  --zs-bar: 3rem;
+  --zs-chrome: 40px;
+  --zs-chrome-hit: 48px;
+  --zs-btn: 38px;
+  --zs-btn-mini: 32px;
   width: 100%;
   max-width: none;
   display: grid;
@@ -152,11 +163,12 @@ body.zeitsprung .zs-play {
   min-height: 0;
   height: 100%;
   padding-top: max(0.15rem, var(--safe-top));
-  padding-left: max(1.35rem, var(--safe-left));
+  padding-left: max(0.55rem, var(--safe-left));
   padding-right: max(0.4rem, var(--safe-right));
   padding-bottom: var(--safe-bottom);
   overflow: hidden;
   touch-action: manipulation;
+  background-color: transparent;
 }
 
 body.zeitsprung .zs-bar {
@@ -176,17 +188,20 @@ body.zeitsprung .zs-bar {
 
 body.zeitsprung .zs-play .btn.room-menu-btn,
 body.zeitsprung .zs-play .btn.mute-btn {
-  width: var(--zs-chrome);
-  min-width: var(--zs-chrome);
-  min-height: var(--zs-chrome);
-  height: var(--zs-chrome);
+  width: var(--zs-chrome-hit);
+  min-width: var(--zs-chrome-hit);
+  min-height: var(--zs-chrome-hit);
+  height: var(--zs-chrome-hit);
   padding: 0;
-  font-size: 0.95rem;
+  font-size: 1.35rem;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
 }
 
 body.zeitsprung .zs-play .mute-btn svg {
-  width: 15px;
-  height: 15px;
+  width: 22px;
+  height: 22px;
 }
 
 body.zeitsprung .zs-play .room-menu-pop {
@@ -208,7 +223,7 @@ body.zeitsprung .zs-board {
 body.zeitsprung .zs-upper {
   min-height: 0;
   overflow: hidden;
-  padding: 0.08rem 0.25rem 0.1rem;
+  padding: 0.35rem 0.25rem 0.1rem;
   display: grid;
   grid-template-columns: minmax(5.2rem, 18%) minmax(0, 1fr) minmax(7.2rem, 26%);
   gap: 0.25rem;
@@ -236,6 +251,7 @@ body.zeitsprung .zs-actions {
 body.zeitsprung .zs-side {
   overflow-x: hidden;
   overflow-y: auto;
+  padding-top: 0.55rem;
 }
 
 body.zeitsprung .zs-center {
@@ -399,20 +415,28 @@ body.zeitsprung .zs-play .zs-actions .zs-lock {
   min-width: 0;
 }
 
-body.zeitsprung .zs-vinyl {
-  width: 3.4rem;
-  height: 3.4rem;
+body.zeitsprung .zs-face-down {
+  flex: 0 0 auto;
+  width: 8.4rem;
+  min-height: 5.1rem;
   margin: 0 auto;
-  border-radius: 50%;
-  border: 0;
-  background:
-    radial-gradient(circle at 50% 50%, #c9a36a 0 14%, #1a120e 15% 18%, #3b2a22 19% 72%, #0c0a09 73%);
+  padding: 0.45rem 0.5rem;
+  border-radius: 0.7rem;
+  border: 1px solid rgba(227, 164, 74, 0.45);
+  background: #2c241c;
   color: #f4efe6;
   display: grid;
   place-items: center;
   box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
   touch-action: none;
-  flex: 0 0 auto;
+  font: inherit;
+  cursor: pointer;
+}
+
+body.zeitsprung .zs-face-down-q {
+  font-size: 2.4rem;
+  font-weight: 800;
+  line-height: 1;
 }
 
 body.zeitsprung .zs-marker {
@@ -420,11 +444,6 @@ body.zeitsprung .zs-marker {
   min-height: 2.4rem;
   border-radius: 0.5rem;
   touch-action: none;
-}
-
-body.zeitsprung .zs-vinyl-q {
-  font-size: 1.8rem;
-  font-weight: 800;
 }
 
 body.zeitsprung .zs-reveal-title {
@@ -512,17 +531,19 @@ body.zs-dragging * {
   left: 0;
   top: 0;
   z-index: 60;
-  width: 4.5rem;
-  height: 4.5rem;
-  border-radius: 50%;
+  width: 7.2rem;
+  min-height: 4.2rem;
+  padding: 0.4rem 0.45rem;
+  border-radius: 0.7rem;
+  border: 1px solid rgba(227, 164, 74, 0.35);
   display: grid;
   place-items: center;
   pointer-events: none;
-  background:
-    radial-gradient(circle at 50% 50%, #c9a36a 0 14%, #1a120e 15% 18%, #3b2a22 19% 72%, #0c0a09 73%);
+  background: #2c241c;
   color: #f4efe6;
   font-weight: 800;
-  font-size: 1.4rem;
+  font-size: 2rem;
+  box-sizing: border-box;
 }
 
 body.zeitsprung .zs-lobby-me {
@@ -539,16 +560,17 @@ body.zeitsprung .zs-play .switch-row {
   gap: 0.5rem;
 }
 
-body.zeitsprung .zs-vinyl:disabled {
+body.zeitsprung .zs-face-down:disabled {
   opacity: 0.85;
 }
 
 @media (orientation: landscape) and (max-height: 420px) {
   body.zeitsprung .zs-play {
-    --zs-bar: 1.75rem;
-    --zs-chrome: 26px;
-    --zs-btn: 30px;
-    --zs-btn-mini: 24px;
+    --zs-bar: 2.85rem;
+    --zs-chrome: 40px;
+    --zs-chrome-hit: 48px;
+    --zs-btn: 34px;
+    --zs-btn-mini: 28px;
   }
 
   body.zeitsprung .zs-center .lead,
@@ -557,13 +579,13 @@ body.zeitsprung .zs-vinyl:disabled {
     line-height: 1.15;
   }
 
-  body.zeitsprung .zs-vinyl {
-    width: 3rem;
-    height: 3rem;
+  body.zeitsprung .zs-face-down {
+    width: 7.4rem;
+    min-height: 4.4rem;
   }
 
-  body.zeitsprung .zs-vinyl-q {
-    font-size: 1.45rem;
+  body.zeitsprung .zs-face-down-q {
+    font-size: 2rem;
   }
 
   body.zeitsprung .zs-tokens {

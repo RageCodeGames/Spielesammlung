@@ -62,7 +62,9 @@ export function bindTimelineDrag({ source, timeline, lockedGap, onHover, onDrop,
 
   const moveGhost = (x, y) => {
     if (!ghost) return;
-    ghost.style.transform = `translate(${x - 36}px, ${y - 36}px)`;
+    const w = ghost.offsetWidth || 115;
+    const h = ghost.offsetHeight || 67;
+    ghost.style.transform = `translate(${x - w / 2}px, ${y - h / 2}px)`;
   };
 
   const stop = (commit, x, y) => {

@@ -2,12 +2,14 @@ import { normalizeRemote, readArray } from "../../shared/online.js";
 import { effectiveYear } from "./suspicious.js";
 import {
   BUY_COST,
+  CHALLENGE_COST,
   CHALLENGE_MS,
   CHALLENGE_PLACE_MS,
   DEFAULT_VARIANT_NAME,
   GOAL_OPTIONS,
   SKIP_COST,
   TOKEN_MAX,
+  TOKEN_START_DEFAULT,
   TOKEN_START_OPTIONS,
 } from "./rules.js";
 
@@ -17,7 +19,7 @@ export function defaultSettings() {
     mix: false,
     goal: 10,
     clipSec: 30,
-    startTokens: 1,
+    startTokens: TOKEN_START_DEFAULT,
     challengeOn: true,
   };
 }
@@ -185,7 +187,7 @@ export function migrateState(data) {
       waitingForHost: false,
       goal: 10,
       clipSec: 30,
-      startTokens: 1,
+      startTokens: TOKEN_START_DEFAULT,
       challengeOn: true,
       mix: false,
       turnIndex: 0,
@@ -431,9 +433,9 @@ export function claimChallenge(state, fromId, at = Date.now()) {
   if (s.phase !== "challenge") return { error: "not-now" };
   if (fromId === s.activeId) return { error: "self" };
   if (s.challengerId) return { error: "taken" };
-  if ((s.tokens[fromId] || 0) < 1) return { error: "no-token" };
+  if ((s.tokens[fromId] || 0) < CHALLENGE_COST) return { error: "no-token" };
   if (s.challengeUntil && at > s.challengeUntil) return { error: "late" };
-  s.tokens[fromId] -= 1;
+  s.tokens[fromId] -= CHALLENGE_COST;
   s.challengerId = fromId;
   s.phase = "challenge-place";
   s.challengeGap = null;

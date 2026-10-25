@@ -5,7 +5,10 @@ export const GOAL_OPTIONS = [8, 10, 12];
 export const CLIP_OPTIONS = [30, 0];
 export const TOKEN_START_OPTIONS = [0, 1, 2, 3];
 export const TOKEN_MAX = 5;
+/** Standard beim Raum-Erstellen */
+export const TOKEN_START_DEFAULT = 2;
 export const SKIP_COST = 1;
+export const CHALLENGE_COST = 1;
 export const BUY_COST = 3;
 export const CHALLENGE_MS = 10_000;
 export const CHALLENGE_PLACE_MS = 15_000;

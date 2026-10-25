@@ -35,6 +35,38 @@ export function localPlayStatus() {
   return playStatus;
 }
 
+function clearClipTimer() {
+  window.clearTimeout(clipTimer);
+  clipTimer = 0;
+}
+
+function armClipTimer(cue) {
+  clearClipTimer();
+  const clip = Number(cue?.clipSec) || 0;
+  if (clip <= 0) return;
+  clipTimer = window.setTimeout(() => {
+    clipTimer = 0;
+    endClipPause();
+  }, clip * 1000);
+}
+
+/** Clip abgelaufen: pausieren, Status egal (Phasenwechsel darf den Timer nicht killen). */
+async function endClipPause() {
+  playGen += 1;
+  if (playStatus === "starting" || playStatus === "playing") playStatus = "paused";
+  const id = localDeviceId();
+  if (!id) return;
+  try {
+    await pause(id);
+  } catch (err) {
+    if (!isDeviceMissingError(err)) console.error("[zeitsprung] Clip-Pause", err);
+  }
+}
+
+/**
+ * Abspiel-Sperre für neuen Cue zurücksetzen.
+ * Clip-Timer bleibt – Phasenwechsel (Einsortieren) darf ihn nicht löschen.
+ */
 export function resetPlayGate(cueId = "") {
   const id = String(cueId || "");
   if (id && id === lastCueId) return;
@@ -42,8 +74,6 @@ export function resetPlayGate(cueId = "") {
   playGen += 1;
   playStatus = "idle";
   playWait = null;
-  window.clearTimeout(clipTimer);
-  clipTimer = 0;
 }
 
 export async function refreshPlayDevices() {
@@ -92,8 +122,7 @@ async function deviceIsPlaying() {
 }
 
 export async function pauseLocal() {
-  window.clearTimeout(clipTimer);
-  clipTimer = 0;
+  clearClipTimer();
   playGen += 1;
   if (playStatus === "idle") return;
   const was = playStatus;
@@ -107,6 +136,30 @@ export async function pauseLocal() {
     await pause(id);
   } catch (err) {
     if (!isDeviceMissingError(err)) console.error("[zeitsprung] Pause", err);
+  }
+}
+
+/** Auflösung / Überspringen / neuer Zug: Wiedergabe hart stoppen. */
+export async function stopPlayback() {
+  clearClipTimer();
+  playGen += 1;
+  playWait = null;
+  const was = playStatus;
+  playStatus = "idle";
+  const id = localDeviceId();
+  if (!id) return;
+  if (was === "idle") {
+    try {
+      const playing = await deviceIsPlaying();
+      if (!playing) return;
+    } catch {
+      return;
+    }
+  }
+  try {
+    await pause(id);
+  } catch (err) {
+    if (!isDeviceMissingError(err)) console.error("[zeitsprung] Stop", err);
   }
 }
 
@@ -131,7 +184,7 @@ export async function playCue(cue, { onSleep, onError } = {}) {
   }
   lastCueId = cue.cueId || lastCueId;
   logDiagnose("Abspielen ausgelöst");
-  window.clearTimeout(clipTimer);
+  clearClipTimer();
   const stillMine = () => gen === playGen;
   const run = async () => {
     let id = localDeviceId();
@@ -164,12 +217,7 @@ export async function playCue(cue, { onSleep, onError } = {}) {
     }
     if (!stillMine()) return { ok: false, reason: "aborted" };
     playStatus = "playing";
-    const clip = Number(cue.clipSec) || 0;
-    if (clip > 0) {
-      clipTimer = window.setTimeout(() => {
-        pauseLocal();
-      }, clip * 1000);
-    }
+    armClipTimer(cue);
     return { ok: true };
   };
   playWait = run();

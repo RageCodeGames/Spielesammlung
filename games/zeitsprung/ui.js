@@ -51,8 +51,20 @@ import {
   refreshPlayDevices,
   resetPlayGate,
   spotifyStatusFromDevices,
+  stopPlayback,
 } from "./playback.js";
-import { DEV_NAMES, GAME_ID, GOAL_OPTIONS, MAX_PLAYERS, MIN_PLAYERS, TOKEN_START_OPTIONS } from "./rules.js";
+import {
+  BUY_COST,
+  CHALLENGE_COST,
+  DEV_NAMES,
+  GAME_ID,
+  GOAL_OPTIONS,
+  MAX_PLAYERS,
+  MIN_PLAYERS,
+  SKIP_COST,
+  TOKEN_START_DEFAULT,
+  TOKEN_START_OPTIONS,
+} from "./rules.js";
 import { listSonglists, loadSonglist } from "./songlist-store.js";
 
 const app = document.getElementById("app");
@@ -556,7 +568,7 @@ async function enterLobby() {
       mix: false,
       goal: 10,
       clipSec: 30,
-      startTokens: 1,
+      startTokens: TOKEN_START_DEFAULT,
       challengeOn: true,
     });
     lobbyHandle = lobbyMod.mountLobby(app, {
@@ -668,9 +680,21 @@ function beginPlay(room) {
   }
 }
 
+function shouldStopPlayback(prevPhase, prevActive, prevCue, next) {
+  if (!next) return false;
+  if (next.phase === "reveal" || next.phase === "end") return true;
+  if (next.phase === "turn") {
+    if (prevPhase && prevPhase !== "turn") return true;
+    if (prevActive && prevActive !== next.activeId) return true;
+    if (prevCue && !next.cue && !next.played) return true;
+  }
+  return false;
+}
+
 function adoptState(next) {
   const prevCue = state?.cue?.cueId;
   const prevPhase = state?.phase;
+  const prevActive = state?.activeId;
   if (next?.phase !== prevPhase) {
     selectedGap = null;
     lastAimedGap = null;
@@ -678,6 +702,7 @@ function adoptState(next) {
   if (next?.phase === "listen" && next.cue) pendingCue = next.cue;
   else if (next?.phase !== "listen") {
     pendingCue = null;
+    /* Clip-Timer weiterlaufen lassen; nur Abspiel-Sperre öffnen */
     resetPlayGate("");
   }
   state = next;
@@ -686,8 +711,8 @@ function adoptState(next) {
   armTick();
   scheduleBots();
   if (next?.cue?.cueId && next.cue.cueId !== prevCue) handleIncomingCue(next.cue);
-  else if (!next?.cue || next.phase !== "listen") {
-    pauseLocal();
+  else if (shouldStopPlayback(prevPhase, prevActive, prevCue, next)) {
+    stopPlayback();
   }
 }
 
@@ -730,6 +755,7 @@ async function rematchNow() {
   selectedGap = null;
   sleepHint = "";
   stopFlip();
+  await stopPlayback();
   const settings = normalizeSettings(onlineRoom.settings || state);
   const lists = [];
   for (const id of settings.playlistIds) {
@@ -920,12 +946,12 @@ async function runBots() {
   if (!dummies.length) return;
   const active = state.players.find((p) => p.id === state.activeId);
   if (active?.dummy && (state.phase === "turn" || state.phase === "listen")) {
-    if (state.phase === "turn" && (state.tokens[active.id] || 0) >= 1 && Math.random() < 0.12) {
+    if (state.phase === "turn" && (state.tokens[active.id] || 0) >= SKIP_COST && Math.random() < 0.12) {
       const next = skipSong(state, secrets, active.id);
       if (!next.error) await publish(next.state, next.secrets);
       return;
     }
-    if (state.phase === "turn" && (state.tokens[active.id] || 0) >= 3 && Math.random() < 0.08) {
+    if (state.phase === "turn" && (state.tokens[active.id] || 0) >= BUY_COST && Math.random() < 0.08) {
       const next = buyCard(state, secrets, active.id);
       if (!next.error) await publish(next.state, next.secrets);
       return;
@@ -944,7 +970,7 @@ async function runBots() {
     }
   }
   if (state.phase === "challenge") {
-    const foe = dummies.find((p) => p.id !== state.activeId && (state.tokens[p.id] || 0) > 0);
+    const foe = dummies.find((p) => p.id !== state.activeId && (state.tokens[p.id] || 0) >= CHALLENGE_COST);
     if (foe && Math.random() < 0.7) {
       const next = claimChallenge(state, foe.id);
       if (!next.error) await publish(next.state, null);
@@ -1063,11 +1089,11 @@ function cardNode(card) {
 }
 
 function vinylButton() {
-  const btn = el("button", "zs-vinyl");
+  const btn = el("button", "zs-face-down");
   btn.type = "button";
   btn.setAttribute("aria-label", "Songkarte");
   btn.setAttribute("data-drag-label", "?");
-  btn.append(el("span", "zs-vinyl-q", "?"));
+  btn.append(el("strong", "zs-face-down-q", "?"));
   const mine = myId() === state.activeId;
   if (mine && state.phase === "turn" && !state.played) {
     btn.addEventListener("click", () => send("play-card"));
@@ -1232,9 +1258,15 @@ function renderPlayView() {
         center.append(el("p", "note", `Lücke ${Number(state.challengeGap) + 1}`));
       }
     }
-    if (phase === "challenge" && me !== state.activeId && (state.tokens[me] || 0) > 0 && !state.challengerId) {
+    if (
+      phase === "challenge" &&
+      me !== state.activeId &&
+      (state.tokens[me] || 0) >= CHALLENGE_COST &&
+      !state.challengerId
+    ) {
       const ch = el("button", "btn primary", "Herausfordern");
       ch.type = "button";
+      ch.title = `Herausfordern (${CHALLENGE_COST} Token)`;
       ch.addEventListener("click", () => send("challenge"));
       actions.append(ch);
     }
@@ -1265,13 +1297,13 @@ function renderPlayView() {
       const row = el("div", "zs-actions-row");
       const skip = el("button", "btn zs-btn-mini", "Überspringen");
       skip.type = "button";
-      skip.disabled = (state.tokens[me] || 0) < 1;
-      skip.title = "Überspringen (1 Token)";
+      skip.disabled = (state.tokens[me] || 0) < SKIP_COST;
+      skip.title = `Überspringen (${SKIP_COST} Token)`;
       skip.addEventListener("click", () => send("skip"));
       const buy = el("button", "btn zs-btn-mini", "Kaufen");
       buy.type = "button";
-      buy.disabled = (state.tokens[me] || 0) < 3;
-      buy.title = "Karte kaufen (3 Tokens)";
+      buy.disabled = (state.tokens[me] || 0) < BUY_COST;
+      buy.title = `Karte kaufen (${BUY_COST} Tokens)`;
       buy.addEventListener("click", () => send("buy"));
       row.append(skip, buy);
       actions.append(row);
