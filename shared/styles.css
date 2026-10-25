@@ -916,17 +916,19 @@ body.spotify-test .spotify-diagnose-box > summary::-webkit-details-marker {
   display: none;
 }
 
-/* Orientierung: Manifest „any“, Spiele sperren selbst. */
+/* Orientierung: rein informativ (iOS kann nicht locken). */
 .orientation-lock {
   position: fixed;
   inset: 0;
   z-index: 10000;
   display: grid;
   place-items: center;
-  padding: 1.5rem;
+  padding: max(1.5rem, var(--safe-top)) max(1.5rem, var(--safe-right)) max(1.5rem, var(--safe-bottom))
+    max(1.5rem, var(--safe-left));
   background: rgba(21, 32, 51, 0.96);
   color: var(--ink, #f4efe6);
   text-align: center;
+  pointer-events: none;
 }
 
 .orientation-lock[hidden] {

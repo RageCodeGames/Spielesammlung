@@ -5,12 +5,31 @@
  *
  * Spiele mit Phasen-Wechsel setzen die Orientierung zentral über
  * `preferredForPlayPhase` / `setPreferred`, nicht pro Bildschirmseite.
+ *
+ * iOS (Safari / Home-Bildschirm): screen.orientation.lock wird nicht
+ * unterstützt – nie darauf verlassen. Nur matchMedia / Fenstergröße.
+ * Der Hinweis ist rein informativ und verschwindet bei korrekter Lage.
  */
 
 const HINTS = {
   portrait: "Bitte Handy hochkant halten",
   landscape: "Bitte Handy quer halten",
 };
+
+function isIos() {
+  const ua = navigator.userAgent || "";
+  if (/iPad|iPhone|iPod/.test(ua)) return true;
+  /* iPadOS 13+ meldet sich oft als Mac */
+  return navigator.platform === "MacIntel" && (navigator.maxTouchPoints || 0) > 1;
+}
+
+/** Orientierung nur messen – nie erzwingen. */
+function isLandscapeNow() {
+  if (window.matchMedia("(orientation: landscape)").matches) return true;
+  if (window.matchMedia("(orientation: portrait)").matches) return false;
+  /* Fallback, falls orientation-Media-Query zögert (ältere WebViews) */
+  return window.innerWidth > window.innerHeight;
+}
 
 /**
  * Querformat nur während einer laufenden Spielphase (nicht Lobby, nicht Ende).
@@ -34,19 +53,23 @@ export function mountOrientation(preferred = "portrait") {
     overlay.className = "orientation-lock";
     overlay.setAttribute("data-orientation-lock", "1");
     overlay.setAttribute("hidden", "");
+    overlay.setAttribute("role", "status");
     const text = document.createElement("p");
     text.setAttribute("data-orientation-text", "1");
     overlay.append(text);
     document.body.append(overlay);
   }
   const textNode = overlay.querySelector("[data-orientation-text]");
+  const ios = isIos();
 
-  const applyLock = () => {
+  /** Android/Desktop-PWA: Lock nur versuchen, nie auf iOS. */
+  const tryLock = () => {
+    if (ios) return;
     try {
       const lock = screen.orientation?.lock?.(mode);
       if (lock && typeof lock.catch === "function") lock.catch(() => {});
     } catch {
-      /* nur in installierter PWA / Fullscreen */
+      /* nicht überall verfügbar */
     }
   };
 
@@ -61,21 +84,31 @@ export function mountOrientation(preferred = "portrait") {
       document.documentElement.classList.remove("orientation-wrong");
       return;
     }
-    const landscape = window.matchMedia("(orientation: landscape)").matches;
+    const landscape = isLandscapeNow();
     const wrong = mode === "portrait" ? landscape : !landscape;
     overlay.hidden = !wrong;
     document.documentElement.classList.toggle("orientation-wrong", wrong);
-    applyLock();
+    if (!wrong) tryLock();
+  };
+
+  /* Nach orientationchange können Maße auf iOS einen Tick hinterherhinken. */
+  let applyTimer = 0;
+  const onChange = () => {
+    apply();
+    window.clearTimeout(applyTimer);
+    applyTimer = window.setTimeout(apply, 50);
+    requestAnimationFrame(apply);
   };
 
   const mqlOrient = window.matchMedia("(orientation: landscape)");
   const mqlPointer = window.matchMedia("(pointer: coarse)");
-  const onChange = () => apply();
   if (typeof mqlOrient.addEventListener === "function") mqlOrient.addEventListener("change", onChange);
   else if (typeof mqlOrient.addListener === "function") mqlOrient.addListener(onChange);
   if (typeof mqlPointer.addEventListener === "function") mqlPointer.addEventListener("change", onChange);
   else if (typeof mqlPointer.addListener === "function") mqlPointer.addListener(onChange);
   window.addEventListener("orientationchange", onChange);
+  window.addEventListener("resize", onChange);
+  window.visualViewport?.addEventListener("resize", onChange);
   apply();
 
   return {
@@ -84,18 +117,23 @@ export function mountOrientation(preferred = "portrait") {
       apply();
     },
     destroy() {
+      window.clearTimeout(applyTimer);
       if (typeof mqlOrient.removeEventListener === "function") mqlOrient.removeEventListener("change", onChange);
       else if (typeof mqlOrient.removeListener === "function") mqlOrient.removeListener(onChange);
       if (typeof mqlPointer.removeEventListener === "function") mqlPointer.removeEventListener("change", onChange);
       else if (typeof mqlPointer.removeListener === "function") mqlPointer.removeListener(onChange);
       window.removeEventListener("orientationchange", onChange);
+      window.removeEventListener("resize", onChange);
+      window.visualViewport?.removeEventListener("resize", onChange);
       overlay.remove();
       document.documentElement.classList.remove("orientation-wrong");
       delete document.documentElement.dataset.orientationPrefer;
-      try {
-        screen.orientation?.unlock?.();
-      } catch {
-        /* egal */
+      if (!ios) {
+        try {
+          screen.orientation?.unlock?.();
+        } catch {
+          /* egal */
+        }
       }
     },
   };
