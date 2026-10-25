@@ -35,7 +35,7 @@ import {
   summarizeSettings,
   tapCard,
 } from "./logic.js";
-import { flipPlayEnabled, setFlipPlayEnabled, watchFaceDown } from "./flip.js";
+import { flipPlayEnabled, formatSensorLine, setFlipPlayEnabled, watchFaceDown } from "./flip.js";
 import {
   chooseDevice,
   listDevices,
@@ -80,9 +80,13 @@ let botTimer = 0;
 let toastTimer = 0;
 let muteControl = null;
 let flipWatch = null;
+let flipStarting = false;
 let pendingCue = null;
 let selectedGap = null;
 let sleepHint = "";
+let sensorReading = { live: false, beta: null, gamma: null, z: null };
+let sensorOpen = false;
+let sensorNoData = false;
 let lastHandledCue = "";
 
 initUpdates();
@@ -598,6 +602,7 @@ function beginPlay(room) {
     renderPlay();
     armTick();
     scheduleBots();
+    startFlipWatch();
     handleIncomingCue(state?.cue);
   } catch (err) {
     showCrash(err);
@@ -643,7 +648,10 @@ function handleAction(action) {
       await rematchNow();
       return;
     }
-    if (next?.error) return;
+    if (next?.error) {
+      if (next.message) toast(next.message);
+      return;
+    }
     if (next?.state) await publish(next.state, next.secrets);
   });
 }
@@ -663,6 +671,7 @@ async function rematchNow() {
   }
   const match = beginMatch(onlineRoom.players, settings, mixCatalogs(lists));
   await publish(match.state, match.secrets);
+  startFlipWatch();
 }
 
 function armTick() {
@@ -692,16 +701,79 @@ function patchTimers() {
 
 function send(type, payload) {
   if (!onlineApi) return;
+  const body = payload && typeof payload === "object" ? payload : {};
   if (iAmHost()) {
-    handleAction({ type, from: myId(), payload }).catch((err) => reportError("Aktion", err));
+    handleAction({ type, from: myId(), payload: body }).catch((err) => reportError("Aktion", err));
     return;
   }
-  onlineApi.sendAction({ type, payload }).catch((err) => reportError("Senden", err));
+  onlineApi.sendAction({ type, payload: body }).catch((err) => reportError("Senden", err));
 }
 
 function stopFlip() {
   flipWatch?.stop?.();
   flipWatch = null;
+  flipStarting = false;
+}
+
+function patchSensorHud() {
+  const line = formatSensorLine(sensorReading);
+  const status = app.querySelector("[data-sensor-status]");
+  const values = app.querySelector("[data-sensor-values]");
+  if (status) status.textContent = `Sensor: ${line.status}`;
+  if (values) values.textContent = line.values;
+}
+
+function playPendingCue() {
+  if (!pendingCue || isMuted()) return;
+  playCue(pendingCue, {
+    onSleep: (msg) => {
+      sleepHint = msg;
+      renderPlay();
+    },
+    onError: (msg) => {
+      sleepHint = msg;
+      renderPlay();
+    },
+  });
+}
+
+async function startFlipWatch() {
+  if (flipWatch || flipStarting) return;
+  flipStarting = true;
+  sensorNoData = false;
+  sensorReading = { live: false, beta: null, gamma: null, z: null };
+  try {
+    const watch = await watchFaceDown({
+      onDown: () => {
+        if (!flipPlayEnabled() || state?.phase !== "listen") return;
+        playPendingCue();
+      },
+      onUp: () => {
+        if (!flipPlayEnabled() || state?.phase !== "listen") return;
+        pauseLocal();
+      },
+      onReading: (reading) => {
+        sensorReading = reading;
+        if (reading?.live) sensorNoData = false;
+        patchSensorHud();
+      },
+      onNoData: () => {
+        sensorNoData = true;
+        renderPlay();
+      },
+    });
+    flipWatch = watch;
+    if (!watch.supported) {
+      sensorNoData = true;
+      renderPlay();
+    }
+  } catch (err) {
+    console.error("[zeitsprung] Sensor", err);
+    sensorNoData = true;
+    renderPlay();
+  } finally {
+    flipStarting = false;
+  }
 }
 
 async function handleIncomingCue(cue) {
@@ -709,20 +781,16 @@ async function handleIncomingCue(cue) {
   lastHandledCue = cue.cueId;
   pendingCue = cue;
   if (isMuted()) return;
+  await startFlipWatch();
   if (!flipPlayEnabled()) {
-    await playCue(cue, { onSleep: (msg) => { sleepHint = msg; renderPlay(); } });
-    return;
+    await playCue(cue, {
+      onSleep: (msg) => {
+        sleepHint = msg;
+        renderPlay();
+      },
+    });
   }
-  stopFlip();
-  const watch = await watchFaceDown({
-    onDown: () => playCue(cue, { onSleep: (msg) => { sleepHint = msg; renderPlay(); } }),
-    onUp: () => pauseLocal(),
-  });
-  flipWatch = watch;
-  if (!watch.supported) {
-    /* Knopf in der UI */
-    renderPlay();
-  }
+  renderPlay();
 }
 
 function scheduleBots() {
@@ -888,20 +956,34 @@ function vinylButton() {
 
 function playFallbackButton() {
   if (isMuted() || !pendingCue) return null;
-  if (!flipPlayEnabled()) return null;
-  if (flipWatch?.supported) return null;
   if (state.phase !== "listen") return null;
   const playBtn = el("button", "btn primary", "Abspielen");
   playBtn.type = "button";
-  playBtn.addEventListener("click", () => {
-    playCue(pendingCue, {
-      onSleep: (msg) => {
-        sleepHint = msg;
-        renderPlay();
-      },
-    });
-  });
+  playBtn.addEventListener("click", () => playPendingCue());
   return playBtn;
+}
+
+function sensorPanel() {
+  const line = formatSensorLine(sensorReading);
+  const box = el("details", "zs-sensor");
+  box.open = sensorOpen;
+  box.addEventListener("toggle", () => {
+    sensorOpen = box.open;
+  });
+  const summary = el("summary", "zs-sensor-summary");
+  const status = el("span", "", `Sensor: ${line.status}`);
+  status.setAttribute("data-sensor-status", "1");
+  summary.append(status);
+  box.append(summary);
+  const values = el("p", "zs-sensor-values", line.values);
+  values.setAttribute("data-sensor-values", "1");
+  box.append(values);
+  if (sensorNoData) {
+    box.append(
+      el("p", "note", "Dein Browser liefert keine Sensordaten – nutze den Abspielen-Knopf")
+    );
+  }
+  return box;
 }
 
 function renderPlay() {
@@ -1041,6 +1123,7 @@ function renderPlay() {
     });
     flipRow.append(flip, el("span", "", "Umdrehen zum Abspielen"));
     upper.append(flipRow);
+    upper.append(sensorPanel());
   }
 
   const lower = el("div", "zs-lower");

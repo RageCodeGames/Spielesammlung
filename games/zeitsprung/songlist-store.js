@@ -26,6 +26,7 @@ export function normalizeSonglist(raw, fallbackId = "") {
       albumType: row.albumType || "",
       suspicious: row.suspicious === true,
       excluded: row.excluded === true,
+      playlistId: String(row.playlistId || raw?.playlistId || fallbackId || "").trim(),
     };
   }
   const name = String(raw?.name || "").trim() || DEFAULT_VARIANT_NAME;
@@ -61,13 +62,19 @@ export async function saveSonglist(list) {
   if (!id) throw new OnlineError("songlist", "Playlist-ID fehlt.");
   try {
     const { db, ref, set, uid } = await openDatabase();
+    const songsIn = list.songs && typeof list.songs === "object" ? list.songs : {};
+    const songs = {};
+    for (const [key, row] of Object.entries(songsIn)) {
+      if (!row || typeof row !== "object") continue;
+      songs[key] = { ...row, playlistId: String(row.playlistId || id).trim() };
+    }
     const payload = jsonSafe({
       playlistId: id,
       title: list.title || "Playlist",
       name: String(list.name || "").trim() || DEFAULT_VARIANT_NAME,
       updatedAt: Date.now(),
       updatedBy: uid || "",
-      songs: list.songs && typeof list.songs === "object" ? list.songs : {},
+      songs,
     });
     await set(ref(db, `songlists/${id}`), payload);
     return normalizeSonglist(payload, id);
@@ -100,6 +107,7 @@ export function mergeCatalogWithStored(catalog, stored) {
       // Korrektur behalten: mit yearOverride nicht wieder als verdächtig markieren
       suspicious: yearOverride != null ? false : track.suspicious === true,
       excluded: old?.excluded === true,
+      playlistId: catalog.id || stored?.playlistId || "",
     };
   }
   return {

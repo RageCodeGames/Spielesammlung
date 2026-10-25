@@ -69,22 +69,32 @@ export function shuffle(list, rng = Math.random) {
   return next;
 }
 
+function packSong(song, fallbackPlaylistId = "", fallbackVariant = "") {
+  if (!song || typeof song !== "object") return null;
+  const id = String(song.id || "").trim();
+  if (!id) return null;
+  const playlistId = String(song.playlistId || fallbackPlaylistId || "").trim();
+  return {
+    id,
+    uri: String(song.uri || "").trim() || `spotify:track:${id}`,
+    title: String(song.title || "Ohne Titel"),
+    artist: String(song.artist || ""),
+    year: Number(song.year) || 0,
+    playlistId,
+    variantName: String(song.variantName || fallbackVariant || DEFAULT_VARIANT_NAME),
+  };
+}
+
 export function playableFromList(list) {
-  const playlistId = list?.playlistId || "";
+  const playlistId = String(list?.playlistId || "").trim();
+  const variantName = list?.name || DEFAULT_VARIANT_NAME;
   const out = [];
   for (const song of Object.values(list?.songs || {})) {
     if (!song?.id || song.excluded) continue;
     const year = effectiveYear(song);
     if (!year) continue;
-    out.push({
-      id: song.id,
-      uri: song.uri || `spotify:track:${song.id}`,
-      title: song.title || "Ohne Titel",
-      artist: song.artist || "",
-      year,
-      playlistId,
-      variantName: list.name || DEFAULT_VARIANT_NAME,
-    });
+    const packed = packSong({ ...song, year, playlistId: song.playlistId || playlistId }, playlistId, variantName);
+    if (packed?.playlistId) out.push(packed);
   }
   return out;
 }
@@ -208,8 +218,8 @@ export function normalizeSecrets(raw) {
   const data = raw && typeof raw === "object" ? raw : {};
   const game = data._game && typeof data._game === "object" ? data._game : data;
   return {
-    deck: readArray(game.deck),
-    current: game.current && typeof game.current === "object" ? game.current : null,
+    deck: readArray(game.deck).map((song) => packSong(song)).filter(Boolean),
+    current: packSong(game.current),
     used: game.used && typeof game.used === "object" ? game.used : {},
   };
 }
@@ -325,14 +335,18 @@ export function beginMatch(roomPlayers, settings, songs, rng = Math.random) {
   return { state, secrets };
 }
 
-export function makeCue(song, clipSec) {
+export function makeCue(song, clipSec, fallbackPlaylistId = "") {
+  const packed = packSong(song, fallbackPlaylistId);
+  const playlistId = packed?.playlistId || String(fallbackPlaylistId || "").trim();
+  const trackUri = packed?.uri || "";
+  if (!playlistId || !trackUri) return null;
   const sentAt = Date.now();
   return {
     cueId: `${sentAt}-${Math.random().toString(36).slice(2, 8)}`,
-    playlistUri: song.playlistId ? `spotify:playlist:${song.playlistId}` : "",
-    trackUri: song.uri || `spotify:track:${song.id}`,
+    playlistUri: `spotify:playlist:${playlistId}`,
+    trackUri,
     sentAt,
-    clipSec: clipSec || 0,
+    clipSec: Number(clipSec) || 0,
   };
 }
 
@@ -342,8 +356,16 @@ export function tapCard(state, secrets, fromId) {
   if (s.phase !== "turn" || s.played) return { error: "not-now" };
   if (fromId !== s.activeId) return { error: "not-active" };
   if (!sec.current) return { error: "no-card" };
+  const fallback = readArray(s.playlistIds).length === 1 ? s.playlistIds[0] : "";
+  const cue = makeCue(sec.current, s.clipSec, fallback);
+  if (!cue) {
+    return {
+      error: "no-uri",
+      message: "Dieser Song hat keine gültige Playlist- oder Song-ID. Überspringe oder kaufe die Karte.",
+    };
+  }
   s.played = true;
-  s.cue = makeCue(sec.current, s.clipSec);
+  s.cue = cue;
   s.phase = "listen";
   return { state: s, secrets: sec };
 }

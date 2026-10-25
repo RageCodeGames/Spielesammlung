@@ -739,6 +739,7 @@ body.spotify-test #app:not(:has(> .screen)) {
 .room-menu {
   position: relative;
   flex: 0 0 auto;
+  z-index: 8;
 }
 
 .room-menu-btn {

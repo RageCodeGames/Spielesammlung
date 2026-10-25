@@ -38,7 +38,7 @@ const state = normalizeRemote(raw, {
 });
 ```
 
-Vor dem Schreiben: `setState` serialisiert bereits JSON-sicher (`undefined` fliegt raus). Arrays mit Inhalt bleiben; leere Arrays fehlen beim nächsten Lesen – deshalb `normalizeRemote` / `readArray` in der eigenen `migrateState`.
+Vor dem Schreiben: `setState`, `sendAction` und die übrigen Schreibvorgänge in `online.js` entfernen `undefined` rekursiv (Pfad in der Konsole) und serialisieren JSON-sicher. Arrays mit Inhalt bleiben; leere Arrays fehlen beim nächsten Lesen – deshalb `normalizeRemote` / `readArray` in der eigenen `migrateState`. `sendAction` schickt immer ein Objekt als `payload` (leeres `{}` statt `undefined`).
 
 ## Lobby und `settingsPanel`
 

@@ -85,8 +85,39 @@ function fail(code, message) {
   throw new OnlineError(code, message);
 }
 
+/**
+ * undefined aus Objekten entfernen (Firebase lehnt es ab) und den Pfad loggen.
+ * Array-Lücken werden zu null, nicht-finite Zahlen ebenfalls.
+ */
+function stripUndefined(value, path = "") {
+  if (value === undefined) {
+    console.error(`[online] undefined-Feld entfernt: ${path || "(root)"}`);
+    return undefined;
+  }
+  if (value === null) return null;
+  const type = typeof value;
+  if (type === "number" && !Number.isFinite(value)) {
+    console.error(`[online] ungültige Zahl entfernt: ${path || "(root)"}`, value);
+    return null;
+  }
+  if (type !== "object") return value;
+  if (Array.isArray(value)) {
+    return value.map((item, i) => {
+      const next = stripUndefined(item, path ? `${path}.${i}` : String(i));
+      return next === undefined ? null : next;
+    });
+  }
+  const out = {};
+  for (const [key, val] of Object.entries(value)) {
+    const next = stripUndefined(val, path ? `${path}.${key}` : key);
+    if (next !== undefined) out[key] = next;
+  }
+  return out;
+}
+
 function jsonSafe(value) {
-  return JSON.parse(JSON.stringify(value));
+  const cleaned = stripUndefined(value);
+  return JSON.parse(JSON.stringify(cleaned === undefined ? null : cleaned));
 }
 
 /**
@@ -537,12 +568,15 @@ async function writePlayer(code, name, seat, already) {
   if (already) {
     await update(playerRef, { name, online: true });
   } else {
-    await fbSet(playerRef, {
-      name,
-      online: true,
-      seat,
-      joinedAt: Date.now(),
-    });
+    await fbSet(
+      playerRef,
+      jsonSafe({
+        name,
+        online: true,
+        seat,
+        joinedAt: Date.now(),
+      })
+    );
   }
   await attachPresence();
 }
@@ -577,28 +611,34 @@ async function createRoomInner(newGameId, hostName, settings = {}) {
   if (!code) fail("busy", "Kein freier Raumcode. Bitte nochmal versuchen.");
 
   const createdAt = Date.now();
-  await fbSet(ref(db, `rooms/${code}`), {
-    meta: {
-      gameId: id,
-      hostId: uid,
-      createdAt,
-      status: "lobby",
-      settings: jsonSafe(settings && typeof settings === "object" ? settings : {}),
-    },
-    players: {
-      [uid]: {
-        name,
-        online: true,
-        seat: 0,
-        joinedAt: createdAt,
+  await fbSet(
+    ref(db, `rooms/${code}`),
+    jsonSafe({
+      meta: {
+        gameId: id,
+        hostId: uid,
+        createdAt,
+        status: "lobby",
+        settings: settings && typeof settings === "object" ? settings : {},
       },
-    },
-  });
-  await fbSet(ref(db, `roomIndex/${code}`), {
-    createdAt,
-    hostId: uid,
-    gameId: id,
-  });
+      players: {
+        [uid]: {
+          name,
+          online: true,
+          seat: 0,
+          joinedAt: createdAt,
+        },
+      },
+    })
+  );
+  await fbSet(
+    ref(db, `roomIndex/${code}`),
+    jsonSafe({
+      createdAt,
+      hostId: uid,
+      gameId: id,
+    })
+  );
 
   roomCode = code;
   gameId = id;
@@ -901,14 +941,17 @@ export async function addDummyPlayer(displayName) {
     const seats = Object.values(players).map((row) => Number(row?.seat) || 0);
     const seat = seats.length ? Math.max(...seats) + 1 : 0;
     const id = `sim-${randomCode()}${randomCode()}`.slice(0, 16);
-    await fbSet(ref(db, `rooms/${roomCode}/players/${id}`), {
-      name: normalizeName(displayName),
-      online: true,
-      seat,
-      joinedAt: Date.now(),
-      dummy: true,
-      spotifyStatus: "muted",
-    });
+    await fbSet(
+      ref(db, `rooms/${roomCode}/players/${id}`),
+      jsonSafe({
+        name: normalizeName(displayName),
+        online: true,
+        seat,
+        joinedAt: Date.now(),
+        dummy: true,
+        spotifyStatus: "muted",
+      })
+    );
     return id;
   } catch (err) {
     rethrow(err);
@@ -944,12 +987,19 @@ export async function sendAction(action) {
     await initOnline();
     if (!roomCode || !uid) fail("no-room", "Kein Raum.");
     const { ref, push } = fb.dbMod;
-    await push(ref(db, `rooms/${roomCode}/actions`), {
-      from: uid,
-      type: action?.type || "action",
-      payload: action?.payload ?? action ?? null,
-      at: Date.now(),
-    });
+    const payload =
+      action?.payload != null && typeof action.payload === "object" && !Array.isArray(action.payload)
+        ? action.payload
+        : {};
+    await push(
+      ref(db, `rooms/${roomCode}/actions`),
+      jsonSafe({
+        from: uid,
+        type: action?.type || "action",
+        payload,
+        at: Date.now(),
+      })
+    );
   } catch (err) {
     rethrow(err);
   }

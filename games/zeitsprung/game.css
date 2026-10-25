@@ -132,20 +132,39 @@ body.zeitsprung .spotify-sleep-hint {
   border-radius: 0.5rem;
 }
 
+body.zeitsprung:has(.zs-play) #app {
+  padding-top: 0;
+  padding-left: 0;
+  padding-right: 0;
+}
+
 body.zeitsprung .zs-play {
   width: 100%;
   max-width: none;
   display: grid;
   grid-template-rows: auto 1fr;
   min-height: 0;
+  padding-top: max(0.45rem, var(--safe-top));
+  padding-left: max(2.75rem, var(--safe-left));
+  padding-right: max(0.75rem, var(--safe-right));
+  padding-bottom: var(--safe-bottom);
+  overflow: visible;
 }
 
 body.zeitsprung .zs-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.2rem 0.6rem;
+  padding: 0.25rem 0.15rem;
   gap: 0.5rem;
+  overflow: visible;
+  position: relative;
+  z-index: 8;
+}
+
+body.zeitsprung .zs-play .room-menu-pop {
+  left: 0;
+  right: auto;
 }
 
 body.zeitsprung .zs-bar-tools {
@@ -313,6 +332,22 @@ body.zeitsprung .zs-mine-label {
 body.zeitsprung .zs-flip {
   margin-top: auto;
   font-size: 0.88rem;
+}
+
+body.zeitsprung .zs-sensor {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+body.zeitsprung .zs-sensor-summary {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--text);
+}
+
+body.zeitsprung .zs-sensor-values {
+  margin: 0.2rem 0 0;
+  font-variant-numeric: tabular-nums;
 }
 
 body.zeitsprung .zs-lobby-me {
