@@ -515,8 +515,11 @@ function deliverAction(action, actionRef) {
       console.error(err);
     }
   }
+  // Host löscht mit kurzer Verzögerung, damit Mitspieler onChildAdded noch mitbekommen.
   if (isHost() && actionRef) {
-    fb.dbMod.remove(actionRef).catch(() => {});
+    globalThis.setTimeout(() => {
+      fb.dbMod.remove(actionRef).catch(() => {});
+    }, 2500);
   }
 }
 

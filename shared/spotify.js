@@ -402,6 +402,11 @@ function note(message, extras = {}) {
   pushDiagnose({ method: "play", path: "", status: "…", message, ...extras });
 }
 
+/** Freie Diagnose-Zeile (z. B. empfangene Online-Befehle). */
+export function logDiagnose(message, extras = {}) {
+  note(message, extras);
+}
+
 /**
  * Song starten:
  * 1. Gerät schon aktiv → direkt play, sonst Transfer mit play: true, 1 s warten, dann play.

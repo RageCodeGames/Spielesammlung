@@ -29,6 +29,7 @@ import {
   play,
   playViaPlaylist,
   playViaQueue,
+  logDiagnose,
   redirectUri,
   resume,
   setPreferredDeviceId,
@@ -48,7 +49,7 @@ let devices = [];
 let deviceId = getPreferredDeviceId();
 let clipSec = 30;
 let muted = isMuted();
-let lastCueSeq = 0;
+let lastCueId = "";
 let countdownTimer = 0;
 let countdownUntil = 0;
 let lobby = null;
@@ -205,13 +206,19 @@ async function startHere(runner, clip, sentAt) {
     stopCountdown();
     if (lagNode) lagNode.textContent = "Stumm – nicht abgespielt";
     showNote(hint, "Dieses Gerät ist stumm.");
+    logDiagnose("Abspiel gestoppt: dieses Gerät ist stumm");
     return;
   }
   const id = await ensurePlayDevice({ reloadIfMissing: true });
   if (!id) {
     if (lagNode) lagNode.textContent = "";
+    logDiagnose(`Abspiel gestoppt: kein Gerät gewählt (${devices.length} in der Liste)`);
     return;
   }
+  const device = devices.find((row) => row.id === id);
+  logDiagnose(
+    `Abspiel startet lokal · Gerät=${device?.name || id} · eigenes Token · ${isHost() ? "Host" : "Mitspieler"}`
+  );
   const t0 = Number(sentAt) || Date.now();
   if (lagNode) lagNode.textContent = "Starte …";
   try {
@@ -224,6 +231,7 @@ async function startHere(runner, clip, sentAt) {
     startCountdown(clip, result?.state);
   } catch (err) {
     if (lagNode) lagNode.textContent = "";
+    logDiagnose(`Abspiel fehlgeschlagen: ${explainError(err)}`);
     showError(hint, err, "Abspielen");
   }
 }
@@ -372,6 +380,35 @@ function cueTarget(cue) {
   return cue.trackUri ? { trackUri: cue.trackUri } : { position: Number(cue.position) || 0 };
 }
 
+/** Nur Playlist + Song/Position – nie Geräte-ID oder Token. */
+function sanitizeCue(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const playlistUri = typeof raw.playlistUri === "string" ? raw.playlistUri : "";
+  const trackUri = typeof raw.trackUri === "string" ? raw.trackUri : "";
+  if (!playlistUri && !trackUri) return null;
+  const sentAt = Number(raw.sentAt) || Date.now();
+  const cueId =
+    typeof raw.cueId === "string" && raw.cueId
+      ? raw.cueId
+      : `${sentAt}-${Number(raw.seq) || 0}`;
+  return {
+    cueId,
+    playlistUri,
+    trackUri,
+    position: Math.max(0, Math.floor(Number(raw.position) || 0)),
+    clipSec: Math.max(0, Math.floor(Number(raw.clipSec) || 0)),
+    sentAt,
+  };
+}
+
+function formatCueStamp(ms) {
+  return new Date(ms).toLocaleTimeString("de-DE", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 async function refreshDevices() {
   const hint = app.querySelector("[data-device-hint]");
   const box = app.querySelector("[data-devices]");
@@ -426,14 +463,36 @@ function paintDevices(box) {
   paintSelectedDevice();
 }
 
-function handleCue(cue) {
-  if (!cue?.playlistUri && !cue?.trackUri) return;
-  const seq = Number(cue.seq) || 0;
-  if (seq && seq <= lastCueSeq) return;
-  if (seq) lastCueSeq = seq;
-  const clip = Number(cue.clipSec) || 0;
-  if (cue.playlistUri) playPlaylistHere(cue.playlistUri, cueTarget(cue), clip, cue.sentAt);
-  else playHere(cue.trackUri, cue.startMs || 0, clip, cue.sentAt);
+/**
+ * Befehl auf diesem Gerät ausführen (Host und Mitspieler gleich).
+ * Nutzt nur das lokale Spotify-Token und die lokal gewählte Geräte-ID.
+ */
+async function applyCue(raw, source) {
+  const cue = sanitizeCue(raw);
+  if (!cue) {
+    logDiagnose(`Befehl ignoriert (ungültig) · Quelle=${source}`);
+    return;
+  }
+  if (cue.cueId === lastCueId) {
+    logDiagnose(`Befehl schon verarbeitet · cueId=${cue.cueId} · Quelle=${source}`);
+    return;
+  }
+  lastCueId = cue.cueId;
+
+  const songBit = cue.trackUri
+    ? `Song-ID=${cue.trackUri}`
+    : `Position=${cue.position}`;
+  logDiagnose(
+    `Befehl vom Host empfangen · Playlist=${cue.playlistUri || "–"} · ${songBit} · Zeit=${formatCueStamp(
+      cue.sentAt
+    )} · cueId=${cue.cueId} · Quelle=${source}`
+  );
+
+  if (cue.playlistUri) {
+    await playPlaylistHere(cue.playlistUri, cueTarget(cue), cue.clipSec, cue.sentAt);
+  } else {
+    await playHere(cue.trackUri, 0, cue.clipSec, cue.sentAt);
+  }
 }
 
 async function playAll() {
@@ -443,25 +502,36 @@ async function playAll() {
     showNote(hint, target.error, true);
     return;
   }
+  if (!room) {
+    showNote(hint, "Kein Raum – zuerst Lobby starten.", true);
+    return;
+  }
   const sentAt = Date.now();
-  const seq = lastCueSeq + 1;
-  lastCueSeq = seq;
   const cue = {
-    seq,
+    cueId: `${sentAt}-${Math.random().toString(36).slice(2, 9)}`,
     playlistUri: target.playlistUri,
-    trackUri: target.trackUri,
-    position: target.position,
+    trackUri: target.trackUri || "",
+    position: target.trackUri ? 0 : target.position,
     sentAt,
     clipSec,
   };
-  await playPlaylistHere(cue.playlistUri, cueTarget(cue), clipSec, sentAt);
-  if (!room) return;
+  const songBit = cue.trackUri ? `Song-ID=${cue.trackUri}` : `Position=${cue.position}`;
+  logDiagnose(
+    `Sende Befehl an alle · Playlist=${cue.playlistUri} · ${songBit} · Zeit=${formatCueStamp(
+      sentAt
+    )} · cueId=${cue.cueId} (ohne Geräte-ID, ohne Token)`
+  );
   try {
+    // Zuerst Zustand + Action, dann lokal abspielen – Mitspieler sollen nicht auf den Host warten.
+    await setState({ cue });
     await sendAction({ type: "play-all", payload: cue });
-    if (isHost()) await setState({ cue });
   } catch (err) {
     showError(hint, err, "An alle senden");
+    logDiagnose(`Senden fehlgeschlagen: ${explainError(err)}`);
+    return;
   }
+  // Host spielt über dieselbe Logik wie Mitspieler (Dedup verhindert Doppelstart über state/action).
+  await applyCue(cue, "host-lokal");
 }
 
 function appendDiagnose(parent) {
@@ -496,7 +566,7 @@ function showLobby() {
       publishSpotifyToRoom();
     },
     async onBeforeStart() {
-      lastCueSeq = 0;
+      lastCueId = "";
       await setState({});
     },
     onStart(next) {
@@ -517,7 +587,7 @@ function showRoomPlay(initial) {
   if (!slot) return;
   clearUnsubs();
   room = initial;
-  lastCueSeq = 0;
+  lastCueId = "";
   slot.innerHTML = "";
   slot.classList.add("spotify-online-flat");
 
@@ -596,15 +666,22 @@ function showRoomPlay(initial) {
       list.append(item);
     }
     paintSameAccountWarning(accountWarn, next.players);
-    if (next.state?.cue) handleCue(next.state.cue);
+    if (next.state?.cue) applyCue(next.state.cue, "raum-zustand");
   }
 
   paint(initial);
   unsubs.push(onRoomChange((next) => paint(next)));
   unsubs.push(
     onAction((action) => {
-      if (action.type === "play-all") handleCue(action.payload);
+      if (action.type !== "play-all") return;
+      // Jedes Gerät (auch Mitspieler) – keine Host-Prüfung.
+      applyCue(action.payload, "action");
     })
+  );
+  logDiagnose(
+    `Raum bereit · ${isHost() ? "Host" : "Mitspieler"} · lauscht auf „play-all“ · Spotify=${
+      session?.displayName || "–"
+    }`
   );
 }
 
