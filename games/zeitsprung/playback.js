@@ -1,6 +1,7 @@
 import {
   explainError,
   getDevices,
+  getPlayback,
   getPreferredDeviceId,
   logDiagnose,
   pause,
@@ -16,6 +17,11 @@ let lastCueId = "";
 let devices = [];
 let deviceId = getPreferredDeviceId();
 let clipTimer = 0;
+/** idle | starting | playing | paused */
+let playStatus = "idle";
+let playWait = null;
+/** Ungültig gemacht, sobald Pause oder ein neuer Cue kommt. */
+let playGen = 0;
 
 export function localDeviceId() {
   return deviceId || devices.find((row) => row.active)?.id || devices[0]?.id || "";
@@ -23,6 +29,21 @@ export function localDeviceId() {
 
 export function listDevices() {
   return devices;
+}
+
+export function localPlayStatus() {
+  return playStatus;
+}
+
+export function resetPlayGate(cueId = "") {
+  const id = String(cueId || "");
+  if (id && id === lastCueId) return;
+  lastCueId = id;
+  playGen += 1;
+  playStatus = "idle";
+  playWait = null;
+  window.clearTimeout(clipTimer);
+  clipTimer = 0;
 }
 
 export async function refreshPlayDevices() {
@@ -61,11 +82,27 @@ function isDeviceMissingError(err) {
   );
 }
 
+async function deviceIsPlaying() {
+  try {
+    const now = await getPlayback();
+    return Boolean(now?.isPlaying);
+  } catch {
+    return false;
+  }
+}
+
 export async function pauseLocal() {
   window.clearTimeout(clipTimer);
   clipTimer = 0;
+  playGen += 1;
+  if (playStatus === "idle") return;
+  const was = playStatus;
+  playStatus = playStatus === "starting" ? "idle" : "paused";
   const id = localDeviceId();
   if (!id) return;
+  if (was !== "playing" && was !== "starting") return;
+  const playing = await deviceIsPlaying();
+  if (!playing) return;
   try {
     await pause(id);
   } catch (err) {
@@ -75,26 +112,36 @@ export async function pauseLocal() {
 
 export async function playCue(cue, { onSleep, onError } = {}) {
   if (!cue?.trackUri || !cue?.playlistUri) return { ok: false, reason: "bad-cue" };
-  if (cue.cueId && cue.cueId === lastCueId) return { ok: false, reason: "dup" };
+  if (playStatus === "starting" || playStatus === "playing") {
+    return { ok: false, reason: "busy" };
+  }
+  playStatus = "starting";
+  const gen = (playGen += 1);
   const age = Date.now() - (Number(cue.sentAt) || 0);
   if (age > CUE_MAX_AGE_MS) {
+    playStatus = "idle";
     logDiagnose(`Befehl verpasst (${Math.round(age / 1000)}s alt)`);
-    lastCueId = cue.cueId || "";
+    lastCueId = cue.cueId || lastCueId;
     return { ok: false, reason: "stale" };
   }
-  lastCueId = cue.cueId || "";
   if (isMuted()) {
+    playStatus = "idle";
     logDiagnose("Stumm – Song nicht gestartet");
     return { ok: false, reason: "muted" };
   }
+  lastCueId = cue.cueId || lastCueId;
+  logDiagnose("Abspielen ausgelöst");
   window.clearTimeout(clipTimer);
+  const stillMine = () => gen === playGen;
   const run = async () => {
     let id = localDeviceId();
     if (!id || !devices.some((row) => row.id === id)) {
       await refreshPlayDevices();
       id = localDeviceId();
     }
+    if (!stillMine()) return { ok: false, reason: "aborted" };
     if (!id) {
+      playStatus = "idle";
       onSleep?.(SLEEP_HINT);
       return { ok: false, reason: "sleep" };
     }
@@ -104,7 +151,9 @@ export async function playCue(cue, { onSleep, onError } = {}) {
       if (isDeviceMissingError(err)) {
         await refreshPlayDevices();
         id = localDeviceId();
+        if (!stillMine()) return { ok: false, reason: "aborted" };
         if (!id) {
+          playStatus = "idle";
           onSleep?.(SLEEP_HINT);
           return { ok: false, reason: "sleep" };
         }
@@ -113,6 +162,8 @@ export async function playCue(cue, { onSleep, onError } = {}) {
         throw err;
       }
     }
+    if (!stillMine()) return { ok: false, reason: "aborted" };
+    playStatus = "playing";
     const clip = Number(cue.clipSec) || 0;
     if (clip > 0) {
       clipTimer = window.setTimeout(() => {
@@ -121,13 +172,18 @@ export async function playCue(cue, { onSleep, onError } = {}) {
     }
     return { ok: true };
   };
+  playWait = run();
   try {
-    return await run();
+    return await playWait;
   } catch (err) {
+    if (!stillMine()) return { ok: false, reason: "aborted" };
+    playStatus = "idle";
     console.error("[zeitsprung] Abspielen", err);
     logDiagnose(explainError(err));
     if (isDeviceMissingError(err)) onSleep?.(SLEEP_HINT);
     else onError?.(explainError(err));
     return { ok: false, reason: "error", err };
+  } finally {
+    if (stillMine()) playWait = null;
   }
 }

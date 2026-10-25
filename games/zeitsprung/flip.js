@@ -1,10 +1,10 @@
 import { get, set } from "../../shared/storage.js";
 import { FLIP_KEY } from "./rules.js";
 
-const FACE_DOWN_HOLD_MS = 180;
+const FACE_DOWN_HOLD_MS = 500;
 const NO_DATA_MS = 2000;
 const BETA_DOWN = 140;
-const Z_FACE_DOWN = 6;
+const Z_FACE_DOWN = -6;
 
 export function flipPlayEnabled() {
   const stored = get(FLIP_KEY, null);
@@ -32,20 +32,20 @@ export function formatSensorLine(reading) {
 }
 
 /**
- * Display nach unten: |beta| groß (flach auf dem Display) oder z > 6
- * (Beschleunigung aus dem Bildschirm heraus, Schwerkraft Richtung Boden).
+ * Display nach unten: z < -6 (Samsung: z ≈ +9,8 bei Display nach oben).
+ * Ohne z-Wert: |beta| nahe 180°.
  */
 export function isFaceDown(beta, z) {
-  const byBeta = Number.isFinite(beta) && Math.abs(beta) > BETA_DOWN;
-  const byZ = Number.isFinite(z) && z > Z_FACE_DOWN;
-  return byBeta || byZ;
+  if (Number.isFinite(z)) return z < Z_FACE_DOWN;
+  return Number.isFinite(beta) && Math.abs(beta) > BETA_DOWN;
 }
 
 export function faceDownReason(beta, z) {
-  const parts = [];
-  if (Number.isFinite(beta) && Math.abs(beta) > BETA_DOWN) parts.push(`|β|=${Math.abs(beta).toFixed(0)}> ${BETA_DOWN}`);
-  if (Number.isFinite(z) && z > Z_FACE_DOWN) parts.push(`z=${z.toFixed(1)}>${Z_FACE_DOWN}`);
-  return parts.join(" · ") || "kein Schwellenwert";
+  if (Number.isFinite(z)) return `z=${z.toFixed(1)}<${Z_FACE_DOWN}`;
+  if (Number.isFinite(beta) && Math.abs(beta) > BETA_DOWN) {
+    return `|β|=${Math.abs(beta).toFixed(0)}>${BETA_DOWN}`;
+  }
+  return "kein Schwellenwert";
 }
 
 async function requestSensorPermission() {

@@ -45,9 +45,11 @@ import {
   chooseDevice,
   listDevices,
   localDeviceId,
+  localPlayStatus,
   pauseLocal,
   playCue,
   refreshPlayDevices,
+  resetPlayGate,
   spotifyStatusFromDevices,
 } from "./playback.js";
 import { DEV_NAMES, GAME_ID, GOAL_OPTIONS, MAX_PLAYERS, MIN_PLAYERS, TOKEN_START_OPTIONS } from "./rules.js";
@@ -624,7 +626,10 @@ function adoptState(next) {
     lastAimedGap = null;
   }
   if (next?.phase === "listen" && next.cue) pendingCue = next.cue;
-  else if (next?.phase !== "listen") pendingCue = null;
+  else if (next?.phase !== "listen") {
+    pendingCue = null;
+    resetPlayGate("");
+  }
   state = next;
   syncOrientation();
   renderPlay();
@@ -750,7 +755,8 @@ function playPendingCue() {
     logDiagnose("Abspielen nicht: Gerät ist stumm");
     return;
   }
-  logDiagnose("Abspielen ausgelöst");
+  const status = localPlayStatus();
+  if (status === "starting" || status === "playing") return;
   playCue(cue, {
     onSleep: (msg) => {
       sleepHint = msg;
@@ -760,7 +766,16 @@ function playPendingCue() {
       sleepHint = msg;
       renderPlay();
     },
-  });
+  }).then(() => renderPlay());
+}
+
+function togglePlayback() {
+  const status = localPlayStatus();
+  if (status === "starting" || status === "playing") {
+    pauseLocal().then(() => renderPlay());
+    return;
+  }
+  playPendingCue();
 }
 
 async function startFlipWatch() {
@@ -794,7 +809,7 @@ async function startFlipWatch() {
       },
       onUp: () => {
         if (!flipPlayEnabled() || state?.phase !== "listen") return;
-        pauseLocal();
+        pauseLocal().then(() => renderPlay());
       },
       onReading: (reading) => {
         sensorReading = reading;
@@ -824,7 +839,10 @@ async function handleIncomingCue(cue) {
   if (!cue?.cueId) return;
   pendingCue = cue;
   const fresh = cue.cueId !== lastHandledCue;
-  if (fresh) lastHandledCue = cue.cueId;
+  if (fresh) {
+    lastHandledCue = cue.cueId;
+    resetPlayGate(cue.cueId);
+  }
   renderPlay();
   if (isMuted()) return;
   startFlipWatch();
@@ -1020,9 +1038,11 @@ function playFallbackButton() {
   if (isMuted()) return null;
   if (state.phase !== "listen") return null;
   if (!listeningCue()) return null;
-  const playBtn = el("button", "btn primary", "Abspielen");
+  const status = localPlayStatus();
+  const label = status === "playing" || status === "starting" ? "Pause" : status === "paused" ? "Weiter" : "Abspielen";
+  const playBtn = el("button", "btn primary", label);
   playBtn.type = "button";
-  playBtn.addEventListener("click", () => playPendingCue());
+  playBtn.addEventListener("click", () => togglePlayback());
   return playBtn;
 }
 
@@ -1172,25 +1192,30 @@ function renderPlay() {
     center.append(el("p", "lead", me === state.activeId ? "Du bist dran" : `${active} ist dran`));
     vinyl = vinylButton();
     center.append(vinyl);
-    const playBtn = playFallbackButton();
-    if (playBtn) actions.append(playBtn);
-    if (me === state.activeId) {
-      if (phase === "listen") {
-        const go = el("button", "btn primary zs-lock", "Festlegen");
-        go.type = "button";
-        go.disabled = selectedGap == null;
-        go.addEventListener("click", confirmPlace);
-        actions.append(go);
-      }
-      const skip = el("button", "btn", "Überspringen");
+    if (phase === "listen") {
+      const playBtn = playFallbackButton();
+      if (playBtn) actions.append(playBtn);
+    }
+    if (me === state.activeId && phase === "listen" && selectedGap != null) {
+      const go = el("button", "btn primary zs-lock", "Festlegen");
+      go.type = "button";
+      go.addEventListener("click", confirmPlace);
+      actions.append(go);
+    }
+    if (me === state.activeId && (phase === "turn" || phase === "listen")) {
+      const row = el("div", "zs-actions-row");
+      const skip = el("button", "btn zs-btn-mini", "Überspringen");
       skip.type = "button";
       skip.disabled = (state.tokens[me] || 0) < 1;
+      skip.title = "Überspringen (1 Token)";
       skip.addEventListener("click", () => send("skip"));
-      const buy = el("button", "btn", "Kaufen");
+      const buy = el("button", "btn zs-btn-mini", "Kaufen");
       buy.type = "button";
       buy.disabled = (state.tokens[me] || 0) < 3;
+      buy.title = "Karte kaufen (3 Tokens)";
       buy.addEventListener("click", () => send("buy"));
-      actions.append(skip, buy);
+      row.append(skip, buy);
+      actions.append(row);
     }
   }
 
@@ -1258,17 +1283,60 @@ function renderPlay() {
   }
 }
 
-completeLoginIfRedirected()
-  .then((ok) => {
-    if (ok) session = getStoredSession();
-  })
-  .catch((err) => {
-    bootError = explainError(err);
-    console.error("[zeitsprung] Redirect", err);
-  })
-  .finally(() => {
-    session = getStoredSession();
-    if (savedView() === "import") openImport();
-    else if (savedView() === "lobby") enterLobby();
-    else renderBoot();
-  });
+function isLayoutPreview() {
+  try {
+    return new URL(location.href).searchParams.get("layout") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function renderLayoutPreview() {
+  orientation.setPreferred("landscape");
+  lobbyTools = {
+    appendRoomMenu(parent) {
+      const btn = el("button", "btn room-menu-btn", "⋯");
+      btn.type = "button";
+      parent.append(btn);
+    },
+  };
+  onlineApi = { isHost: () => true, getPlayerId: () => "a" };
+  state = {
+    phase: "listen",
+    players: [
+      { id: "a", name: "Anna" },
+      { id: "b", name: "Ben" },
+      { id: "c", name: "Nia" },
+    ],
+    tokens: { a: 2, b: 1, c: 1 },
+    activeId: "a",
+    timelines: {
+      a: [{ id: "1", title: "Highway", artist: "Band", year: 1979 }],
+      b: [{ id: "2", title: "Night", artist: "Duo", year: 1984 }],
+      c: [{ id: "3", title: "River", artist: "Trio", year: 1991 }],
+    },
+    cue: { cueId: "preview", trackUri: "spotify:track:x", playlistUri: "spotify:playlist:y" },
+    played: true,
+  };
+  selectedGap = 1;
+  renderPlay();
+}
+
+if (isLayoutPreview()) {
+  renderLayoutPreview();
+} else {
+  completeLoginIfRedirected()
+    .then((ok) => {
+      if (ok) session = getStoredSession();
+    })
+    .catch((err) => {
+      bootError = explainError(err);
+      console.error("[zeitsprung] Redirect", err);
+    })
+    .finally(() => {
+      session = getStoredSession();
+      if (savedView() === "import") openImport();
+      else if (savedView() === "lobby") enterLobby();
+      else renderBoot();
+    });
+}

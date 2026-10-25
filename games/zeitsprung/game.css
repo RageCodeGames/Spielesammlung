@@ -106,8 +106,10 @@ body.zeitsprung .zs-correction-list.is-bad {
 }
 
 body.zeitsprung .mute-btn {
-  width: 48px;
-  min-width: 48px;
+  width: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  height: 32px;
   padding: 0;
   display: grid;
   place-items: center;
@@ -123,13 +125,13 @@ body.zeitsprung .mute-btn svg {
 }
 
 body.zeitsprung .spotify-sleep-hint {
-  margin: 0.4rem 0;
-  padding: 0.55rem 0.7rem;
-  font-size: 1rem;
+  margin: 0;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.78rem;
   font-weight: 700;
   color: #f3c0b8;
   background: rgba(180, 35, 24, 0.18);
-  border-radius: 0.5rem;
+  border-radius: 0.4rem;
 }
 
 body.zeitsprung:has(.zs-play) #app {
@@ -139,15 +141,19 @@ body.zeitsprung:has(.zs-play) #app {
 }
 
 body.zeitsprung .zs-play {
+  --zs-bar: 1.85rem;
+  --zs-chrome: 28px;
+  --zs-btn: 32px;
+  --zs-btn-mini: 26px;
   width: 100%;
   max-width: none;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: var(--zs-bar) minmax(0, 1fr);
   min-height: 0;
   height: 100%;
-  padding-top: max(0.45rem, var(--safe-top));
-  padding-left: max(2.75rem, var(--safe-left));
-  padding-right: max(0.75rem, var(--safe-right));
+  padding-top: max(0.15rem, var(--safe-top));
+  padding-left: max(1.35rem, var(--safe-left));
+  padding-right: max(0.4rem, var(--safe-right));
   padding-bottom: var(--safe-bottom);
   overflow: hidden;
   touch-action: manipulation;
@@ -157,11 +163,30 @@ body.zeitsprung .zs-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.25rem 0.15rem;
-  gap: 0.5rem;
+  height: var(--zs-bar);
+  min-height: var(--zs-bar);
+  max-height: var(--zs-bar);
+  padding: 0 0.1rem;
+  gap: 0.3rem;
   overflow: visible;
   position: relative;
   z-index: 8;
+  flex-shrink: 0;
+}
+
+body.zeitsprung .zs-play .btn.room-menu-btn,
+body.zeitsprung .zs-play .btn.mute-btn {
+  width: var(--zs-chrome);
+  min-width: var(--zs-chrome);
+  min-height: var(--zs-chrome);
+  height: var(--zs-chrome);
+  padding: 0;
+  font-size: 0.95rem;
+}
+
+body.zeitsprung .zs-play .mute-btn svg {
+  width: 15px;
+  height: 15px;
 }
 
 body.zeitsprung .zs-play .room-menu-pop {
@@ -175,7 +200,7 @@ body.zeitsprung .zs-bar-tools {
 
 body.zeitsprung .zs-board {
   display: grid;
-  grid-template-rows: 1fr 1fr;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
@@ -183,10 +208,10 @@ body.zeitsprung .zs-board {
 body.zeitsprung .zs-upper {
   min-height: 0;
   overflow: hidden;
-  padding: 0.15rem 0.4rem 0.25rem;
+  padding: 0.08rem 0.25rem 0.1rem;
   display: grid;
-  grid-template-columns: minmax(6.5rem, 22%) minmax(0, 1fr) minmax(7.2rem, 26%);
-  gap: 0.4rem;
+  grid-template-columns: minmax(5.2rem, 18%) minmax(0, 1fr) minmax(7.2rem, 26%);
+  gap: 0.25rem;
   align-items: stretch;
 }
 
@@ -231,14 +256,37 @@ body.zeitsprung .zs-center .note {
 body.zeitsprung .zs-actions {
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  gap: 0.3rem;
+  justify-content: flex-start;
+  gap: 0.18rem;
+  padding-top: 0;
+  overflow: hidden;
 }
 
-body.zeitsprung .zs-actions .btn {
+body.zeitsprung .zs-play .zs-actions .btn {
   width: 100%;
-  min-height: 44px;
-  padding: 0.3rem 0.45rem;
+  min-height: var(--zs-btn);
+  height: var(--zs-btn);
+  max-height: var(--zs-btn);
+  padding: 0.1rem 0.3rem;
+  font-size: 0.82rem;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+body.zeitsprung .zs-actions-row {
+  display: flex;
+  gap: 0.18rem;
+  flex: 0 0 auto;
+}
+
+body.zeitsprung .zs-play .zs-actions-row .btn {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: var(--zs-btn-mini);
+  height: var(--zs-btn-mini);
+  max-height: var(--zs-btn-mini);
+  font-size: 0.68rem;
+  padding: 0.08rem 0.15rem;
 }
 
 body.zeitsprung .zs-tokens {
@@ -345,15 +393,15 @@ body.zeitsprung .zs-gap.is-lock {
   border-style: solid;
 }
 
-body.zeitsprung .zs-lock {
-  align-self: center;
-  width: auto;
-  min-width: 7rem;
+body.zeitsprung .zs-play .zs-actions .zs-lock {
+  align-self: stretch;
+  width: 100%;
+  min-width: 0;
 }
 
 body.zeitsprung .zs-vinyl {
-  width: 4.8rem;
-  height: 4.8rem;
+  width: 3.4rem;
+  height: 3.4rem;
   margin: 0 auto;
   border-radius: 50%;
   border: 0;
@@ -493,6 +541,57 @@ body.zeitsprung .zs-play .switch-row {
 
 body.zeitsprung .zs-vinyl:disabled {
   opacity: 0.85;
+}
+
+@media (orientation: landscape) and (max-height: 420px) {
+  body.zeitsprung .zs-play {
+    --zs-bar: 1.75rem;
+    --zs-chrome: 26px;
+    --zs-btn: 30px;
+    --zs-btn-mini: 24px;
+  }
+
+  body.zeitsprung .zs-center .lead,
+  body.zeitsprung .zs-center .note {
+    font-size: 0.8rem;
+    line-height: 1.15;
+  }
+
+  body.zeitsprung .zs-vinyl {
+    width: 3rem;
+    height: 3rem;
+  }
+
+  body.zeitsprung .zs-vinyl-q {
+    font-size: 1.45rem;
+  }
+
+  body.zeitsprung .zs-tokens {
+    font-size: 0.7rem;
+    gap: 0.18rem;
+  }
+
+  body.zeitsprung .zs-token {
+    padding: 0.08rem 0.35rem;
+  }
+
+  body.zeitsprung .zs-mine-label {
+    font-size: 0.75rem;
+  }
+
+  body.zeitsprung .zs-card {
+    width: 6.4rem;
+    padding: 0.3rem 0.35rem;
+  }
+
+  body.zeitsprung .zs-card-year {
+    font-size: 1.25rem;
+  }
+
+  body.zeitsprung .zs-gap {
+    min-height: 3.5rem;
+    width: 1.5rem;
+  }
 }
 
 body.zeitsprung .toast {

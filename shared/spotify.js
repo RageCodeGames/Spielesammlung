@@ -589,19 +589,34 @@ async function verifyPlaying(uri, deviceId, label) {
   return ok ? state : null;
 }
 
+let idlePauseNoted = false;
+
+function isIdlePauseError(err) {
+  const blob = `${err?.code || ""} ${err?.reason || ""} ${err?.message || ""} ${err?.detail || ""}`;
+  return (
+    err?.status === 404 ||
+    err?.code === "restriction" ||
+    err?.reason === "RESTRICTION_VIOLATED" ||
+    /restriction violated/i.test(blob)
+  );
+}
+
 export async function pause(deviceId) {
   const query = deviceId ? `?device_id=${encodeURIComponent(deviceId)}` : "";
   try {
     await api("PUT", `/me/player/pause${query}`);
   } catch (err) {
-    if (err?.status === 404) {
-      pushDiagnose({
-        method: "PUT",
-        path: `/me/player/pause${query}`,
-        status: 404,
-        reason: err.reason || "NO_ACTIVE_DEVICE",
-        message: "Pause: kein aktives Gerät (ignoriert)",
-      });
+    if (isIdlePauseError(err)) {
+      if (!idlePauseNoted) {
+        idlePauseNoted = true;
+        pushDiagnose({
+          method: "PUT",
+          path: `/me/player/pause${query}`,
+          status: err?.status || 403,
+          reason: err?.reason || "RESTRICTION_VIOLATED",
+          message: "Pause ignoriert (es lief nichts)",
+        });
+      }
       return;
     }
     throw err;
@@ -645,18 +660,26 @@ async function api(method, path, body) {
         ? text
         : `${text.slice(0, 800)}…`
       : "";
-  pushDiagnose({
-    method,
-    path,
-    status: response.status,
-    reason: response.ok ? "" : reason || (response.status === 403 ? "Forbidden" : ""),
-    message: response.ok
-      ? response.status === 204 || response.status === 202
-        ? "OK (kein Inhalt)"
-        : "OK"
-      : message || (response.status === 403 ? "Forbidden (403)" : `Fehler ${response.status}`),
-    detail: errDetail,
-  });
+  const idlePause =
+    method === "PUT" &&
+    String(path).startsWith("/me/player/pause") &&
+    (response.status === 404 ||
+      reason === "RESTRICTION_VIOLATED" ||
+      /restriction violated/i.test(`${reason} ${message} ${text}`));
+  if (!idlePause) {
+    pushDiagnose({
+      method,
+      path,
+      status: response.status,
+      reason: response.ok ? "" : reason || (response.status === 403 ? "Forbidden" : ""),
+      message: response.ok
+        ? response.status === 204 || response.status === 202
+          ? "OK (kein Inhalt)"
+          : "OK"
+        : message || (response.status === 403 ? "Forbidden (403)" : `Fehler ${response.status}`),
+      detail: errDetail,
+    });
+  }
 
   if (response.status === 204 || response.status === 202) return null;
   if (!response.ok) throw fromApiError(response.status, data, path, text);
