@@ -8,7 +8,7 @@
  * skipWaiting läuft nicht von selbst – erst, wenn das Banner angetippt wird.
  */
 
-const CACHE_NAME = "kajuete-v47";
+const CACHE_NAME = "kajuete-v48";
 
 const PRECACHE = [
   "./",

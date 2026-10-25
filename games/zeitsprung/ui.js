@@ -29,6 +29,7 @@ import {
   firstValidGap,
   migrateState,
   countUniqueSongs,
+  dealCue,
   effectiveMix,
   mixCatalogs,
   normalizeSecrets,
@@ -112,6 +113,8 @@ let sensorNoData = false;
 let lastHandledCue = "";
 let lastAimedGap = null;
 let dragStop = null;
+/** Cue-ID, für die der Umdreh-Hinweis schon weg kann (Song lief). */
+let flipHintDoneCue = "";
 
 initUpdates();
 
@@ -759,6 +762,20 @@ function shouldStopPlayback(prevPhase, prevActive, prevCue, next) {
   return false;
 }
 
+function ensureHostCue() {
+  if (!iAmHost() || !state || state.waitingForHost) return;
+  if (state.phase !== "turn" || state.played || state.cue) return;
+  if (!secrets?.current) return;
+  const dealt = dealCue(state, secrets);
+  if (dealt.error && !dealt.state?.cue) {
+    if (dealt.message) toast(dealt.message);
+    return;
+  }
+  if (dealt.state) {
+    publish(dealt.state, dealt.secrets).catch((err) => reportError("Cue", err));
+  }
+}
+
 function adoptState(next) {
   const prevCue = state?.cue?.cueId;
   const prevPhase = state?.phase;
@@ -782,6 +799,7 @@ function adoptState(next) {
   else if (shouldStopPlayback(prevPhase, prevActive, prevCue, next)) {
     stopPlayback();
   }
+  ensureHostCue();
 }
 
 function handleAction(action) {
@@ -889,6 +907,22 @@ function listeningCue() {
   return state?.cue || pendingCue || null;
 }
 
+function markFlipHintDone(cue) {
+  const id = cue?.cueId || "";
+  if (!id || flipHintDoneCue === id) return;
+  flipHintDoneCue = id;
+}
+
+function showFlipHint() {
+  if (isMuted() || !flipPlayEnabled()) return false;
+  if (state?.phase !== "listen") return false;
+  const cue = listeningCue();
+  if (!cue?.cueId) return false;
+  if (flipHintDoneCue === cue.cueId) return false;
+  const status = localPlayStatus();
+  return status === "idle" || status === "paused";
+}
+
 function playPendingCue() {
   const cue = listeningCue() || pendingCue;
   if (!cue) {
@@ -910,7 +944,10 @@ function playPendingCue() {
       sleepHint = msg;
       renderPlay();
     },
-  }).then(() => renderPlay());
+  }).then((result) => {
+    if (result?.ok) markFlipHintDone(cue);
+    renderPlay();
+  });
 }
 
 function togglePlayback() {
@@ -986,18 +1023,21 @@ async function handleIncomingCue(cue) {
   if (fresh) {
     lastHandledCue = cue.cueId;
     resetPlayGate(cue.cueId);
+    if (flipHintDoneCue && flipHintDoneCue !== cue.cueId) flipHintDoneCue = "";
   }
   renderPlay();
   if (isMuted()) return;
   startFlipWatch();
   if (fresh && !flipPlayEnabled()) {
     logDiagnose("Cue empfangen – starte ohne Umdrehen");
-    await playCue(cue, {
+    const result = await playCue(cue, {
       onSleep: (msg) => {
         sleepHint = msg;
         renderPlay();
       },
     });
+    if (result?.ok) markFlipHintDone(cue);
+    renderPlay();
   }
 }
 
@@ -1014,18 +1054,13 @@ async function runBots() {
   if (!dummies.length) return;
   const active = state.players.find((p) => p.id === state.activeId);
   if (active?.dummy && (state.phase === "turn" || state.phase === "listen")) {
-    if (state.phase === "turn" && (state.tokens[active.id] || 0) >= SKIP_COST && Math.random() < 0.12) {
+    if ((state.tokens[active.id] || 0) >= SKIP_COST && Math.random() < 0.12) {
       const next = skipSong(state, secrets, active.id);
       if (!next.error) await publish(next.state, next.secrets);
       return;
     }
-    if (state.phase === "turn" && (state.tokens[active.id] || 0) >= BUY_COST && Math.random() < 0.08) {
+    if ((state.tokens[active.id] || 0) >= BUY_COST && Math.random() < 0.08) {
       const next = buyCard(state, secrets, active.id);
-      if (!next.error) await publish(next.state, next.secrets);
-      return;
-    }
-    if (state.phase === "turn") {
-      const next = tapCard(state, secrets, active.id);
       if (!next.error) await publish(next.state, next.secrets);
       return;
     }
@@ -1162,11 +1197,16 @@ function vinylButton() {
   btn.setAttribute("aria-label", "Songkarte");
   btn.setAttribute("data-drag-label", "?");
   btn.append(el("strong", "zs-face-down-q", "?"));
-  const mine = myId() === state.activeId;
-  if (mine && state.phase === "turn" && !state.played) {
-    btn.addEventListener("click", () => send("play-card"));
-  }
   return btn;
+}
+
+function flipHintNode() {
+  if (!showFlipHint()) return null;
+  const hint = el("p", "zs-flip-hint");
+  hint.setAttribute("role", "status");
+  hint.append(el("span", "zs-flip-hint-icon", "↻"));
+  hint.append(el("span", "", "Handy umdrehen zum Abspielen"));
+  return hint;
 }
 
 function challengeMarker() {
@@ -1351,6 +1391,8 @@ function renderPlayView() {
     center.append(el("p", "lead", me === state.activeId ? "Du bist dran" : `${active} ist dran`));
     vinyl = vinylButton();
     center.append(vinyl);
+    const flipHint = flipHintNode();
+    if (flipHint) center.append(flipHint);
     if (phase === "listen") {
       const playBtn = playFallbackButton();
       if (playBtn) actions.append(playBtn);

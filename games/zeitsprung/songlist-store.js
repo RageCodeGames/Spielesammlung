@@ -56,6 +56,21 @@ export async function loadSonglist(playlistId) {
   }
 }
 
+/** Variante aus Firebase löschen. */
+export async function deleteSonglist(playlistId) {
+  const id = String(playlistId || "").trim();
+  if (!id) throw new OnlineError("songlist", "Playlist-ID fehlt.");
+  try {
+    const { db, ref, remove } = await openDatabase();
+    await remove(ref(db, `songlists/${id}`));
+    return true;
+  } catch (err) {
+    console.error("[zeitsprung] Songliste löschen", err);
+    if (err instanceof OnlineError) throw err;
+    throw new OnlineError("songlist", err?.message || "Songliste konnte nicht gelöscht werden.");
+  }
+}
+
 /** Liste schreiben (kompletter Stand). */
 export async function saveSonglist(list) {
   const id = String(list?.playlistId || "").trim();

@@ -307,6 +307,39 @@ function setActive(state, playerId) {
   state.phase = "turn";
 }
 
+/**
+ * Cue für den aktuellen Song setzen und Hörphase starten (ohne Karten-Antippen).
+ * @returns {{ state, secrets } | { error, message? }}
+ */
+export function dealCue(state, secrets) {
+  const s = migrateState(state);
+  const sec = normalizeSecrets(secrets);
+  if (s.phase === "end") return { state: s, secrets: sec };
+  if (!sec.current) return { error: "no-card" };
+  if (s.phase === "listen" && s.cue && s.played) return { state: s, secrets: sec };
+  const fallback = readArray(s.playlistIds).length === 1 ? s.playlistIds[0] : "";
+  const cue = makeCue(sec.current, s.clipSec, fallback);
+  if (!cue) {
+    return {
+      error: "no-uri",
+      message: "Dieser Song hat keine gültige Playlist- oder Song-ID. Überspringe oder kaufe die Karte.",
+      state: s,
+      secrets: sec,
+    };
+  }
+  s.played = true;
+  s.cue = cue;
+  s.phase = "listen";
+  return { state: s, secrets: sec };
+}
+
+function startPlayerTurn(state, secrets, playerId) {
+  setActive(state, playerId);
+  const dealt = dealCue(state, secrets);
+  if (dealt.error && !dealt.state) return dealt;
+  return { state: dealt.state || state, secrets: dealt.secrets || secrets, error: dealt.error, message: dealt.message };
+}
+
 function checkWin(state, playerId) {
   const n = readArray(state.timelines?.[playerId]).length;
   if (n >= state.goal) {
@@ -372,7 +405,8 @@ export function beginMatch(roomPlayers, settings, songs, rng = Math.random) {
     current,
     used,
   };
-  return { state, secrets };
+  const dealt = dealCue(state, secrets);
+  return { state: dealt.state || state, secrets: dealt.secrets || secrets };
 }
 
 export function makeCue(song, clipSec, fallbackPlaylistId = "") {
@@ -390,24 +424,14 @@ export function makeCue(song, clipSec, fallbackPlaylistId = "") {
   };
 }
 
+/** Früher: Karte antippen. Cue kommt jetzt automatisch – Funktion bleibt für Alt-Clients. */
 export function tapCard(state, secrets, fromId) {
   const s = migrateState(state);
   const sec = normalizeSecrets(secrets);
-  if (s.phase !== "turn" || s.played) return { error: "not-now" };
   if (fromId !== s.activeId) return { error: "not-active" };
-  if (!sec.current) return { error: "no-card" };
-  const fallback = readArray(s.playlistIds).length === 1 ? s.playlistIds[0] : "";
-  const cue = makeCue(sec.current, s.clipSec, fallback);
-  if (!cue) {
-    return {
-      error: "no-uri",
-      message: "Dieser Song hat keine gültige Playlist- oder Song-ID. Überspringe oder kaufe die Karte.",
-    };
-  }
-  s.played = true;
-  s.cue = cue;
-  s.phase = "listen";
-  return { state: s, secrets: sec };
+  if (s.phase === "listen" && s.cue) return { state: s, secrets: sec };
+  if (s.phase !== "turn" || s.played) return { error: "not-now" };
+  return dealCue(s, sec);
 }
 
 export function skipSong(state, secrets, fromId) {
@@ -424,8 +448,7 @@ export function skipSong(state, secrets, fromId) {
     s.winnerId = s.winnerId || longestPlayer(s);
     return { state: s, secrets: drawn.secrets };
   }
-  setActive(s, fromId);
-  return { state: s, secrets: drawn.secrets };
+  return startPlayerTurn(s, drawn.secrets, fromId);
 }
 
 export function buyCard(state, secrets, fromId) {
@@ -594,8 +617,7 @@ function advanceTurn(state, secrets) {
     return { state, secrets: drawn.secrets };
   }
   const nid = state.order[nextIndex(state.order, state.activeId)];
-  setActive(state, nid);
-  return { state, secrets: drawn.secrets };
+  return startPlayerTurn(state, drawn.secrets, nid);
 }
 
 export function dropPlayer(state, secrets, playerId) {

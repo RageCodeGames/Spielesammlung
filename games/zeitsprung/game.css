@@ -566,6 +566,35 @@ body.zeitsprung .zs-face-down:disabled {
   opacity: 0.85;
 }
 
+body.zeitsprung .zs-flip-hint {
+  margin: 0.15rem 0 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  max-width: 100%;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(227, 164, 74, 0.22);
+  border: 1px solid rgba(227, 164, 74, 0.55);
+  color: #f4efe6;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+body.zeitsprung .zs-flip-hint-icon {
+  display: grid;
+  place-items: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 0.35rem;
+  background: rgba(227, 164, 74, 0.35);
+  font-size: 1rem;
+  font-weight: 800;
+  flex: 0 0 auto;
+}
+
 /* iPhone Querformat inkl. Dynamic Island (z. B. 844×390, 932×430) */
 @media (orientation: landscape) and (max-height: 450px) {
   body.zeitsprung .zs-play {

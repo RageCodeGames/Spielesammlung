@@ -1,6 +1,7 @@
 import { effectiveYear } from "./suspicious.js";
 
 export const CSV_HEADER = "ID;Titel;Interpret;Album;Jahr;Verdächtig";
+export const CSV_HEADER_ALL = "Variante;ID;Titel;Interpret;Album;Jahr;Verdächtig";
 
 function escapeField(value) {
   const text = String(value ?? "");
@@ -8,20 +9,33 @@ function escapeField(value) {
   return text;
 }
 
-/** CSV-Zeile mit Semikolon (Export). */
-export function buildSongCsv(songs) {
-  const lines = [CSV_HEADER];
+/**
+ * CSV-Export.
+ * @param {Array} songs
+ * @param {{ withVariant?: boolean }} [options]
+ */
+export function buildSongCsv(songs, options = {}) {
+  const withVariant = options.withVariant === true;
+  const lines = [withVariant ? CSV_HEADER_ALL : CSV_HEADER];
   for (const song of songs) {
-    lines.push(
-      [
-        song.id,
-        escapeField(song.title),
-        escapeField(song.artist),
-        escapeField(song.album),
-        effectiveYear(song) || "",
-        song.suspicious ? "ja" : "nein",
-      ].join(";")
+    const cells = [];
+    if (withVariant) {
+      const names = Array.isArray(song.variantNames)
+        ? song.variantNames
+        : song.variantName
+          ? [song.variantName]
+          : [];
+      cells.push(escapeField(names.join(", ")));
+    }
+    cells.push(
+      song.id,
+      escapeField(song.title),
+      escapeField(song.artist),
+      escapeField(song.album),
+      effectiveYear(song) || "",
+      song.suspicious ? "ja" : "nein"
     );
+    lines.push(cells.join(";"));
   }
   return `${lines.join("\n")}\n`;
 }
@@ -71,7 +85,7 @@ export function splitCsvLine(line, delimiter) {
 
 function isHeaderRow(cells) {
   const lower = cells.map((c) => c.toLowerCase());
-  return lower.includes("id") || lower.includes("jahr") || lower[0] === "id";
+  return lower.includes("id") || lower.includes("jahr") || lower[0] === "id" || lower.includes("variante");
 }
 
 function validYear(value) {
@@ -81,7 +95,7 @@ function validYear(value) {
 }
 
 /**
- * Korrekturdatei parsen.
+ * Korrekturdatei parsen. Spalte „Variante“ wird ignoriert.
  * @returns {{ changes: Array, unknown: Array, invalid: Array }}
  */
 export function parseYearCorrections(text, songsById) {
@@ -101,9 +115,13 @@ export function parseYearCorrections(text, songsById) {
     start = 1;
     const lower = firstCells.map((c) => c.toLowerCase());
     idIdx = lower.indexOf("id");
-    if (idIdx < 0) idIdx = 0;
+    if (idIdx < 0) idIdx = lower[0] === "variante" ? 1 : 0;
     yearIdx = lower.indexOf("jahr");
-    if (yearIdx < 0) yearIdx = firstCells.length - 1;
+    if (yearIdx < 0) {
+      /* letzte Spalte, die nicht „Verdächtig“ heißt */
+      yearIdx = lower.lastIndexOf("verdächtig") >= 0 ? lower.length - 2 : firstCells.length - 1;
+      if (yearIdx < 0) yearIdx = firstCells.length - 1;
+    }
   }
 
   const seen = new Set();

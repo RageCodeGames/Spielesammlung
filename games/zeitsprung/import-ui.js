@@ -11,7 +11,13 @@ import {
 import { buildSongCsv, parseYearCorrections } from "./csv.js";
 import { DEFAULT_VARIANT_NAME } from "./rules.js";
 import { effectiveYear, isSuspiciousAlbum } from "./suspicious.js";
-import { listSonglists, loadSonglist, mergeCatalogWithStored, saveSonglist } from "./songlist-store.js";
+import {
+  deleteSonglist,
+  listSonglists,
+  loadSonglist,
+  mergeCatalogWithStored,
+  saveSonglist,
+} from "./songlist-store.js";
 
 let app = document.getElementById("app");
 
@@ -137,8 +143,10 @@ function askExportScope() {
     dialog.append(el("p", "", "Welche Songs exportieren?"));
     const suspectBtn = el("button", "btn primary", "Nur verdächtige");
     suspectBtn.type = "button";
-    const allBtn = el("button", "btn", "Alle");
+    const allBtn = el("button", "btn", "Alle (diese Variante)");
     allBtn.type = "button";
+    const allVariantsBtn = el("button", "btn", "Alle Varianten");
+    allVariantsBtn.type = "button";
     const cancel = el("button", "btn", "Abbrechen");
     cancel.type = "button";
     const finish = (value) => {
@@ -147,29 +155,94 @@ function askExportScope() {
     };
     suspectBtn.addEventListener("click", () => finish("suspect"));
     allBtn.addEventListener("click", () => finish("all"));
+    allVariantsBtn.addEventListener("click", () => finish("all-variants"));
     cancel.addEventListener("click", () => finish(null));
     back.addEventListener("click", (event) => {
       if (event.target === back) finish(null);
     });
-    dialog.append(suspectBtn, allBtn, cancel);
+    dialog.append(suspectBtn, allBtn, allVariantsBtn, cancel);
     back.append(dialog);
     document.body.append(back);
     suspectBtn.focus();
   });
 }
 
-async function exportSongList() {
-  if (!list) return;
-  const scope = await askExportScope();
-  if (!scope) return;
-  const rows = songRows().filter((song) => (scope === "suspect" ? song.suspicious : true));
-  if (!rows.length) {
-    setStatus(scope === "suspect" ? "Keine verdächtigen Songs." : "Keine Songs zum Export.", true);
-    return;
+function askConfirm(message) {
+  return new Promise((resolve) => {
+    const back = el("div", "dialog-back");
+    const dialog = el("div", "dialog");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.append(el("p", "", message));
+    const ok = el("button", "btn primary", "Löschen");
+    ok.type = "button";
+    const cancel = el("button", "btn", "Abbrechen");
+    cancel.type = "button";
+    const finish = (value) => {
+      back.remove();
+      resolve(value);
+    };
+    ok.addEventListener("click", () => finish(true));
+    cancel.addEventListener("click", () => finish(false));
+    back.addEventListener("click", (event) => {
+      if (event.target === back) finish(false);
+    });
+    dialog.append(ok, cancel);
+    back.append(dialog);
+    document.body.append(back);
+    cancel.focus();
+  });
+}
+
+async function collectAllVariantSongs(onlySuspect) {
+  const rows = variants.length ? variants : await listSonglists();
+  const byId = new Map();
+  for (const meta of rows) {
+    const stored = await loadSonglist(meta.playlistId);
+    if (!stored) continue;
+    const name = stored.name || meta.name || DEFAULT_VARIANT_NAME;
+    for (const song of Object.values(stored.songs || {})) {
+      if (!song?.id) continue;
+      if (onlySuspect && !song.suspicious) continue;
+      const prev = byId.get(song.id);
+      if (!prev) {
+        byId.set(song.id, {
+          ...song,
+          variantNames: [name],
+        });
+      } else {
+        if (!prev.variantNames.includes(name)) prev.variantNames.push(name);
+        if (song.yearOverride != null && prev.yearOverride == null) prev.yearOverride = song.yearOverride;
+        if (song.suspicious) prev.suspicious = true;
+      }
+    }
   }
-  const csv = buildSongCsv(rows);
+  return [...byId.values()].sort(
+    (a, b) =>
+      String(a.title).localeCompare(String(b.title), "de") ||
+      String(a.artist).localeCompare(String(b.artist), "de")
+  );
+}
+
+async function songsIndexAllVariants() {
+  const rows = variants.length ? variants : await listSonglists();
+  const byId = {};
+  for (const meta of rows) {
+    const stored = await loadSonglist(meta.playlistId);
+    if (!stored) continue;
+    for (const song of Object.values(stored.songs || {})) {
+      if (!song?.id) continue;
+      if (!byId[song.id]) byId[song.id] = { ...song };
+      else if (song.yearOverride != null && byId[song.id].yearOverride == null) {
+        byId[song.id] = { ...byId[song.id], yearOverride: song.yearOverride };
+      }
+    }
+  }
+  return byId;
+}
+
+async function downloadCsv(csv, fileName, shareTitle) {
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  const fileName = "zeitsprung-songs.csv";
   const file = new File([blob], fileName, { type: "text/csv" });
 
   let copied = false;
@@ -194,53 +267,148 @@ async function exportSongList() {
   try {
     if (navigator.share) {
       if (navigator.canShare?.({ files: [file] })) {
-        await navigator.share({ files: [file], title: "Zeitsprung Songliste", text: list.title || "Songliste" });
+        await navigator.share({ files: [file], title: shareTitle, text: shareTitle });
         shared = true;
       } else {
-        await navigator.share({ title: "Zeitsprung Songliste", text: csv });
+        await navigator.share({ title: shareTitle, text: csv });
         shared = true;
       }
     }
   } catch (err) {
     if (err?.name !== "AbortError") console.error("[zeitsprung] Teilen", err);
   }
+  return { copied, shared };
+}
 
+async function exportSongList() {
+  const scope = await askExportScope();
+  if (!scope) return;
+
+  let rows;
+  let withVariant = false;
+  let fileName = "zeitsprung-songs.csv";
+  if (scope === "all-variants") {
+    setStatus("Lade alle Varianten …");
+    try {
+      rows = await collectAllVariantSongs(false);
+      withVariant = true;
+      fileName = "zeitsprung-alle-varianten.csv";
+    } catch (err) {
+      setStatus(explainError(err) || err.message, true);
+      return;
+    }
+  } else {
+    if (!list) {
+      setStatus("Zuerst eine Variante laden.", true);
+      return;
+    }
+    rows = songRows().filter((song) => (scope === "suspect" ? song.suspicious : true));
+  }
+
+  if (!rows.length) {
+    setStatus(scope === "suspect" ? "Keine verdächtigen Songs." : "Keine Songs zum Export.", true);
+    return;
+  }
+  const csv = buildSongCsv(rows, { withVariant });
+  const { copied, shared } = await downloadCsv(csv, fileName, list?.title || "Zeitsprung Songliste");
   const bits = [`${rows.length} Songs exportiert`];
+  if (withVariant) bits.push("alle Varianten");
   if (copied) bits.push("Zwischenablage");
   bits.push("Datei");
   if (shared) bits.push("Teilen");
   setStatus(bits.join(" · "));
 }
 
-function openCorrectionPreview(raw) {
-  if (!list) {
-    setStatus("Zuerst eine Playlist laden.", true);
+async function openCorrectionPreview(raw) {
+  setStatus("Prüfe Korrekturen …");
+  let songsById;
+  try {
+    songsById = await songsIndexAllVariants();
+    if (!Object.keys(songsById).length && list?.songs) songsById = list.songs;
+  } catch (err) {
+    setStatus(explainError(err) || err.message, true);
     return;
   }
-  const parsed = parseYearCorrections(raw, list.songs);
+  if (!Object.keys(songsById).length) {
+    setStatus("Keine Songlisten geladen – zuerst Varianten anlegen.", true);
+    return;
+  }
+  const parsed = parseYearCorrections(raw, songsById);
   correctionPreview = { ...parsed, raw: String(raw || "") };
   if (!parsed.changes.length && !parsed.unknown.length && !parsed.invalid.length) {
     setStatus("Keine brauchbaren Zeilen gefunden.", true);
   } else {
     setStatus(
-      `Vorschau: ${parsed.changes.length} Änderungen · ${parsed.unknown.length} unbekannte IDs · ${parsed.invalid.length} ungültig`
+      `Vorschau: ${parsed.changes.length} Änderungen in allen Varianten · ${parsed.unknown.length} unbekannte IDs · ${parsed.invalid.length} ungültig`
     );
   }
   paint();
 }
 
 async function applyCorrections() {
-  if (!list || !correctionPreview?.changes?.length) return;
-  for (const change of correctionPreview.changes) {
-    const song = list.songs[change.id];
-    if (!song) continue;
-    song.yearOverride = change.to;
-    song.suspicious = false;
+  if (!correctionPreview?.changes?.length) return;
+  const changes = correctionPreview.changes;
+  saving = true;
+  paint();
+  try {
+    const rows = variants.length ? variants : await listSonglists();
+    let listsTouched = 0;
+    let songHits = 0;
+    for (const meta of rows) {
+      const stored = await loadSonglist(meta.playlistId);
+      if (!stored) continue;
+      let dirty = false;
+      for (const change of changes) {
+        const song = stored.songs[change.id];
+        if (!song) continue;
+        song.yearOverride = change.to;
+        song.suspicious = false;
+        dirty = true;
+        songHits += 1;
+      }
+      if (dirty) {
+        await saveSonglist(stored);
+        listsTouched += 1;
+      }
+    }
+    if (list?.playlistId) {
+      list = (await loadSonglist(list.playlistId)) || list;
+    }
+    correctionPreview = null;
+    variants = await listSonglists().catch(() => variants);
+    setStatus(
+      `${changes.length} Korrekturen in ${listsTouched} Varianten übernommen (${songHits} Song-Einträge).`
+    );
+  } catch (err) {
+    console.error("[zeitsprung] Korrekturen", err);
+    setStatus(explainError(err) || err.message, true);
+  } finally {
+    saving = false;
+    paint();
   }
-  const count = correctionPreview.changes.length;
-  correctionPreview = null;
-  await persist();
-  setStatus(`${count} Korrekturen übernommen und gespeichert.`);
+}
+
+async function removeCurrentVariant() {
+  if (!list?.playlistId) return;
+  const name = list.name || list.title || "diese Variante";
+  const ok = await askConfirm(`Variante „${name}“ wirklich löschen? Das lässt sich nicht rückgängig machen.`);
+  if (!ok) return;
+  saving = true;
+  paint();
+  try {
+    const id = list.playlistId;
+    await deleteSonglist(id);
+    list = null;
+    correctionPreview = null;
+    variants = await listSonglists().catch(() => variants.filter((row) => row.playlistId !== id));
+    setStatus(`Variante „${name}“ gelöscht.`);
+  } catch (err) {
+    console.error("[zeitsprung] Variante löschen", err);
+    setStatus(explainError(err) || err.message, true);
+  } finally {
+    saving = false;
+    paint();
+  }
 }
 
 function paintCorrectionPreview(parent) {
@@ -262,7 +430,7 @@ function paintCorrectionPreview(parent) {
     box.append(el("p", "lead", "Keine gültigen Änderungen."));
   }
   if (correctionPreview.unknown.length) {
-    box.append(el("p", "note is-bad", "Unbekannte IDs (nicht in der Liste):"));
+    box.append(el("p", "note is-bad", "Unbekannte IDs (in keiner Variante):"));
     const ul = el("ul", "zs-correction-list is-bad");
     for (const row of correctionPreview.unknown) {
       ul.append(el("li", "", `${row.id} → ${row.year}`));
@@ -525,16 +693,27 @@ function paint() {
       const exportBtn = el("button", "btn", "Liste exportieren");
       exportBtn.type = "button";
       exportBtn.addEventListener("click", () => exportSongList());
-      io.append(exportBtn);
+      const deleteBtn = el("button", "btn", "Variante löschen");
+      deleteBtn.type = "button";
+      deleteBtn.disabled = saving;
+      deleteBtn.addEventListener("click", () => removeCurrentVariant());
+      io.append(exportBtn, deleteBtn);
       body.append(io);
 
       body.append(el("h2", "lobby-list-title", "Korrekturen einspielen"));
+      body.append(
+        el(
+          "p",
+          "note",
+          "Jahre gelten per Track-ID in allen Varianten. Eine Spalte „Variante“ wird ignoriert."
+        )
+      );
       const importLabel = el("label", "lobby-field", "Text einfügen (ID;…;Jahr)");
       const importArea = document.createElement("textarea");
       importArea.className = "text-input zs-import-area";
       importArea.name = "corrections";
       importArea.rows = 5;
-      importArea.placeholder = "ID;Titel;Interpret;Album;Jahr;Verdächtig";
+      importArea.placeholder = "Variante;ID;Titel;Interpret;Album;Jahr;Verdächtig";
       importArea.value = keepImport;
       importLabel.append(importArea);
       body.append(importLabel);
