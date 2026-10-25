@@ -49,6 +49,8 @@ import {
 import { bindTimelineDrag } from "./drag.js";
 import { flipPlayEnabled, formatSensorLine, setFlipPlayEnabled, watchFaceDown } from "./flip.js";
 import {
+  acceptCueOnArrival,
+  checkDeviceOnCue,
   chooseDevice,
   listDevices,
   localDeviceId,
@@ -245,6 +247,11 @@ function clearSubs() {
 }
 
 async function leaveOnline() {
+  try {
+    await stopPlayback();
+  } catch (err) {
+    console.error("[zeitsprung] Stop beim Verlassen", err);
+  }
   clearSubs();
   releaseWakeLock();
   try {
@@ -1082,7 +1089,7 @@ async function startFlipWatch() {
       },
       onUp: () => {
         if (!flipPlayEnabled() || state?.phase !== "listen") return;
-        pauseLocal().then(() => renderPlay());
+        pauseLocal({ holdKeepAlive: true }).then(() => renderPlay());
       },
       onReading: (reading) => {
         sensorReading = reading;
@@ -1115,12 +1122,21 @@ async function handleIncomingCue(cue) {
   if (fresh) {
     lastHandledCue = cue.cueId;
     sleepHint = "";
+    const accepted = acceptCueOnArrival(cue);
     resetPlayGate(cue.cueId);
     if (flipHintDoneCue && flipHintDoneCue !== cue.cueId) flipHintDoneCue = "";
+    if (!accepted.ok) {
+      renderPlay();
+      return;
+    }
   }
   renderPlay();
   if (isMuted()) return;
   startFlipWatch();
+  if (fresh) {
+    await checkDeviceOnCue(playCueHandlers());
+    renderPlay();
+  }
   if (fresh && !flipPlayEnabled()) {
     logDiagnose("Cue empfangen – starte ohne Umdrehen");
     const result = await playCue(cue, playCueHandlers());

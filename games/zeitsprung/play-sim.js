@@ -13,7 +13,7 @@ import {
   START_MODE_RANDOM,
   START_MODE_START,
 } from "./logic.js";
-import { positionMsWasIgnored, sleepDecision } from "./play-policy.js";
+import { cueArrivalDecision, positionMsWasIgnored, sleepDecision } from "./play-policy.js";
 import { isTransientSpotifyStatus, spotifyRetryDelayMs } from "../../shared/spotify-retry.js";
 
 function assert(cond, message) {
@@ -121,6 +121,14 @@ function runPolicyChecks() {
   assert(sleepDecision({ chosenId: "d1", devices: [{ id: "d2" }] }).sleep, "Gerät fehlt");
   assert(!sleepDecision({ chosenId: "d1", devices: [], serverError: true }).sleep, "kein Schlafen bei 502");
   assert(!sleepDecision({ chosenId: "d1", devices: [], loadFailed: true }).sleep, "kein Schlafen bei Ladefehler");
+
+  const now = 100_000;
+  const late = cueArrivalDecision({ cueId: "c1", sentAt: now - 21_000 }, now, "", 20_000);
+  assert(!late.ok && late.reason === "stale", "Empfang nach 21 s verpasst");
+  const onTime = cueArrivalDecision({ cueId: "c2", sentAt: now - 2_000 }, now, "", 20_000);
+  assert(onTime.ok, "Empfang nach 2 s angenommen");
+  const laterPlay = cueArrivalDecision({ cueId: "c2", sentAt: now - 45_000 }, now, "c2", 20_000);
+  assert(laterPlay.ok && laterPlay.already, "Angenommener Cue nach 45 s weiter abspielbar");
 }
 
 function runTenRounds() {

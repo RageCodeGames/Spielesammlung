@@ -1,4 +1,14 @@
-/** Entscheidungen rund um Startpunkt, Seek und „Spotify schläft“. */
+/** Entscheidungen rund um Startpunkt, Seek, Cue-Alter und „Spotify schläft“. */
+
+/** 20-s-Limit nur beim Empfang. Schon angenommene Cues bleiben gültig. */
+export function cueArrivalDecision(cue, now = Date.now(), acceptedId = "", maxAgeMs = 20_000) {
+  const id = String(cue?.cueId || "");
+  if (!id) return { ok: false, reason: "bad-cue" };
+  if (id === acceptedId) return { ok: true, already: true };
+  const age = now - (Number(cue.sentAt) || 0);
+  if (age > maxAgeMs) return { ok: false, reason: "stale", age };
+  return { ok: true, age };
+}
 
 export const FALLBACK_START_MIN_MS = 30_000;
 export const FALLBACK_START_MAX_MS = 70_000;

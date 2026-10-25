@@ -14,6 +14,7 @@ export const CHALLENGE_MS = 10_000;
 export const CHALLENGE_PLACE_MS = 15_000;
 export const DEFAULT_VARIANT_NAME = "Rock";
 export const DEV_NAMES = ["Nia", "Rolo", "Mira", "Timo", "Suri", "Kale", "Pim", "Vela", "Juno", "Pax"];
+/** Nur beim Empfang eines Cues (z. B. Beitritt in einen laufenden Raum). Angenommene Cues bleiben den ganzen Zug abspielbar. */
 export const CUE_MAX_AGE_MS = 20_000;
 export const FLIP_KEY = "kajuete:zeitsprung-flip-play";
 /** Letzte Varianten-/Mix-Auswahl des Hosts */

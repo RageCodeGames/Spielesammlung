@@ -292,6 +292,8 @@ export async function getDevices() {
     type: device.type || "",
     active: device.is_active === true,
     restricted: device.is_restricted === true,
+    supportsVolume: device.supports_volume === true,
+    volumePercent: Number.isFinite(Number(device.volume_percent)) ? Number(device.volume_percent) : null,
   }));
 }
 
@@ -322,6 +324,10 @@ export async function getPlayback() {
     type: data.currently_playing_type || "",
     progressMs: Number(data.progress_ms) || 0,
     durationMs: Number(data.item?.duration_ms) || 0,
+    volumePercent: Number.isFinite(Number(data.device?.volume_percent))
+      ? Number(data.device.volume_percent)
+      : null,
+    supportsVolume: data.device?.supports_volume === true,
     checkedAt: Date.now(),
   };
 }
@@ -392,6 +398,32 @@ export function logDiagnose(message, extras = {}) {
 }
 
 const PLAYLIST_PUBLIC_HINT = "Playlist in Spotify auf öffentlich stellen";
+
+function clampVolumePercent(value, fallback = 50) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(100, n));
+}
+
+/** Lautstärke 0–100. Nur sinnvoll, wenn das Gerät supports_volume hat. */
+export async function setPlaybackVolume(percent, deviceId) {
+  const volume = clampVolumePercent(percent, 0);
+  const query = [`volume_percent=${volume}`];
+  if (deviceId) query.push(`device_id=${encodeURIComponent(deviceId)}`);
+  const path = `/me/player/volume?${query.join("&")}`;
+  note(`Sende: PUT ${path}`);
+  await api("PUT", path);
+}
+
+/** Repeat: off | track | context. */
+export async function setRepeatMode(state, deviceId) {
+  const mode = state === "track" || state === "context" ? state : "off";
+  const query = [`state=${mode}`];
+  if (deviceId) query.push(`device_id=${encodeURIComponent(deviceId)}`);
+  const path = `/me/player/repeat?${query.join("&")}`;
+  note(`Sende: PUT ${path}`);
+  await api("PUT", path);
+}
 
 /** Zufallswiedergabe und Wiederholen abschalten; Fehler nur protokollieren. */
 async function disableShuffleRepeat(deviceId) {

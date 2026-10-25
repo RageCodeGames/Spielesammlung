@@ -7,16 +7,21 @@ import {
   pause,
   playViaPlaylist,
   seekPlayback,
+  setPlaybackVolume,
   setPreferredDeviceId,
+  setRepeatMode,
 } from "../../shared/spotify.js";
 import { isTransientSpotifyStatus } from "../../shared/spotify-retry.js";
 import { isMuted } from "../../shared/mute-button.js";
 import { CUE_MAX_AGE_MS } from "./rules.js";
-import { positionMsWasIgnored, sleepDecision } from "./play-policy.js";
+import { cueArrivalDecision, positionMsWasIgnored, sleepDecision } from "./play-policy.js";
 
 const SLEEP_HINT = "Dein Spotify schläft – öffne kurz Spotify und tippe auf Bereit";
+const CUE_SLEEP_HINT = "Öffne kurz Spotify";
 
 let lastCueId = "";
+/** Cue, der beim Empfang angenommen wurde – den ganzen Zug abspielbar. */
+let acceptedCueId = "";
 let devices = [];
 let deviceId = getPreferredDeviceId();
 let clipTimer = 0;
@@ -25,6 +30,9 @@ let playStatus = "idle";
 let playWait = null;
 /** Ungültig gemacht, sobald Pause oder ein neuer Cue kommt. */
 let playGen = 0;
+let keepAlive = false;
+let savedVolume = 50;
+let keepAliveSupportsVolume = false;
 
 export function localDeviceId() {
   return deviceId || devices.find((row) => row.active)?.id || devices[0]?.id || "";
@@ -49,21 +57,145 @@ function armClipTimer(cue) {
   if (clip <= 0) return;
   clipTimer = window.setTimeout(() => {
     clipTimer = 0;
-    endClipPause();
+    endClipHold();
   }, clip * 1000);
 }
 
-/** Clip abgelaufen: pausieren, Status egal (Phasenwechsel darf den Timer nicht killen). */
-async function endClipPause() {
+function chosenDevice(id = localDeviceId()) {
+  return devices.find((row) => row.id === id) || null;
+}
+
+async function rememberVolume(id) {
+  try {
+    const now = await getPlayback();
+    if (Number.isFinite(now?.volumePercent) && now.volumePercent > 0) {
+      savedVolume = Math.round(now.volumePercent);
+    }
+  } catch {
+    /* Geräteliste als Fallback */
+  }
+  const device = chosenDevice(id);
+  if (savedVolume <= 0 && Number.isFinite(device?.volumePercent) && device.volumePercent > 0) {
+    savedVolume = Math.round(device.volumePercent);
+  }
+  if (savedVolume <= 0) savedVolume = 50;
+}
+
+/** Clip abgelaufen: stumm loopen, damit das Gerät wach bleibt. Ohne Lautstärke: Pause. */
+async function endClipHold() {
   playGen += 1;
   if (playStatus === "starting" || playStatus === "playing") playStatus = "paused";
   const id = localDeviceId();
   if (!id) return;
-  try {
-    await pause(id);
-  } catch (err) {
-    if (!isDeviceMissingError(err)) console.error("[zeitsprung] Clip-Pause", err);
+  const device = chosenDevice(id);
+  const supportsVolume = device?.supportsVolume === true;
+  if (!supportsVolume) {
+    logDiagnose("Clip Ende: Gerät ohne Lautstärke – Pause wie bisher");
+    try {
+      await pause(id);
+    } catch (err) {
+      if (!isDeviceMissingError(err)) console.error("[zeitsprung] Clip-Pause", err);
+    }
+    keepAlive = false;
+    return;
   }
+  logDiagnose("Clip Ende: Lautstärke 0 + Repeat track (Gerät bleibt aktiv, kein Pause)");
+  try {
+    await rememberVolume(id);
+    await setPlaybackVolume(0, id);
+    await setRepeatMode("track", id);
+    keepAlive = true;
+    keepAliveSupportsVolume = true;
+  } catch (err) {
+    logDiagnose(`Clip-Halten fehlgeschlagen (${explainError(err)}) – Pause`);
+    keepAlive = false;
+    try {
+      await pause(id);
+    } catch (pauseErr) {
+      if (!isDeviceMissingError(pauseErr)) console.error("[zeitsprung] Clip-Pause", pauseErr);
+    }
+  }
+}
+
+async function restoreVolume(id) {
+  if (!id || !keepAliveSupportsVolume) return;
+  const volume = savedVolume > 0 ? savedVolume : 50;
+  try {
+    logDiagnose(`Lautstärke zurück auf ${volume}`);
+    await setPlaybackVolume(volume, id);
+  } catch (err) {
+    logDiagnose(`Lautstärke zurücksetzen fehlgeschlagen: ${explainError(err)}`);
+  }
+}
+
+/** Repeat aus, optional Lautstärke zurück. Vor dem nächsten Play oder beim echten Stop. */
+async function liftKeepAlive(id, { restoreVol = false } = {}) {
+  if (!id) {
+    keepAlive = false;
+    return;
+  }
+  try {
+    await setRepeatMode("off", id);
+  } catch (err) {
+    logDiagnose(`Repeat aus: ${explainError(err)}`);
+  }
+  if (restoreVol) await restoreVolume(id);
+  keepAlive = false;
+}
+
+/**
+ * Cue beim Empfang annehmen. Zu alt nur hier (Beitritt in laufenden Raum).
+ * Einmal angenommen bleibt er bis zum nächsten Zug/Auflösung abspielbar.
+ */
+export function acceptCueOnArrival(cue) {
+  const decided = cueArrivalDecision(cue, Date.now(), acceptedCueId, CUE_MAX_AGE_MS);
+  if (decided.already) {
+    logDiagnose("Cue schon angenommen – weiter abspielbar");
+    return decided;
+  }
+  if (!decided.ok) {
+    if (decided.reason === "stale") {
+      logDiagnose(
+        `Befehl verpasst (${Math.round((decided.age || 0) / 1000)}s alt) – nur beim Empfang, nicht angenommen`
+      );
+    }
+    return decided;
+  }
+  acceptedCueId = String(cue.cueId);
+  logDiagnose(
+    `Cue angenommen (${Math.round((decided.age || 0) / 1000)}s alt) – bleibt den ganzen Zug abspielbar`
+  );
+  return decided;
+}
+
+/** Sobald der Cue da ist: Geräte prüfen, Hinweis ohne Umdrehen. */
+export async function checkDeviceOnCue({ onSleep, onError } = {}) {
+  if (isMuted()) {
+    logDiagnose("Vorab-Prüfung: stumm – keine Geräte");
+    return { ok: false, reason: "muted" };
+  }
+  logDiagnose("Vorab-Prüfung zu Zugbeginn: Geräte laden");
+  let id = localDeviceId();
+  try {
+    if (!id || !devices.some((row) => row.id === id)) {
+      await refreshPlayDevices();
+      id = localDeviceId();
+    }
+  } catch (err) {
+    logDiagnose(`Vorab-Prüfung: Geräte laden fehlgeschlagen (${err?.status || err?.code || "Fehler"})`);
+    onError?.(explainError(err));
+    return { ok: false, reason: "error" };
+  }
+  if (id && devices.some((row) => row.id === id)) {
+    logDiagnose(`Vorab-Prüfung: Gerät da (${chosenDevice(id)?.name || id}) – warte auf Umdrehen/Play`);
+    return { ok: true };
+  }
+  logDiagnose("Vorab-Prüfung: Gerät fehlt – Hinweis ohne Umdrehen");
+  const slept = await announceSleepIfGone(id, {
+    onSleep: (msg) => onSleep?.(CUE_SLEEP_HINT || msg),
+    onError,
+  });
+  return { ok: false, reason: slept ? "sleep" : "error" };
 }
 
 /**
@@ -74,6 +206,7 @@ export function resetPlayGate(cueId = "") {
   const id = String(cueId || "");
   if (id && id === lastCueId) return;
   lastCueId = id;
+  if (!id) acceptedCueId = "";
   playGen += 1;
   playStatus = "idle";
   playWait = null;
@@ -184,25 +317,53 @@ async function deviceIsPlaying() {
   }
 }
 
-export async function pauseLocal() {
-  clearClipTimer();
-  playGen += 1;
-  if (playStatus === "idle") return;
-  const was = playStatus;
-  playStatus = playStatus === "starting" ? "idle" : "paused";
-  const id = localDeviceId();
-  if (!id) return;
-  if (was !== "playing" && was !== "starting") return;
-  const playing = await deviceIsPlaying();
-  if (!playing) return;
+async function pauseAndRestore(id, label) {
+  if (!id) {
+    keepAlive = false;
+    return;
+  }
   try {
     await pause(id);
   } catch (err) {
-    if (!isDeviceMissingError(err)) console.error("[zeitsprung] Pause", err);
+    if (!isDeviceMissingError(err)) console.error(`[zeitsprung] ${label}`, err);
   }
+  try {
+    await setRepeatMode("off", id);
+  } catch (err) {
+    logDiagnose(`Repeat aus nach ${label}: ${explainError(err)}`);
+  }
+  await restoreVolume(id);
+  keepAlive = false;
+  keepAliveSupportsVolume = false;
 }
 
-/** Auflösung / Überspringen / neuer Zug: Wiedergabe hart stoppen. */
+export async function pauseLocal({ holdKeepAlive = false } = {}) {
+  if (holdKeepAlive && keepAlive) {
+    logDiagnose("Umdrehen nach Clip: stilles Repeat bleibt, Gerät bleibt aktiv");
+    playGen += 1;
+    playStatus = "paused";
+    return;
+  }
+  clearClipTimer();
+  playGen += 1;
+  if (playStatus === "idle" && !keepAlive) return;
+  const was = playStatus;
+  playStatus = playStatus === "starting" ? "idle" : "paused";
+  const id = localDeviceId();
+  if (!id) {
+    keepAlive = false;
+    return;
+  }
+  if (!keepAlive && was !== "playing" && was !== "starting") return;
+  if (!keepAlive) {
+    const playing = await deviceIsPlaying();
+    if (!playing) return;
+  }
+  logDiagnose("Pause – Repeat aus, Lautstärke zurück");
+  await pauseAndRestore(id, "Pause");
+}
+
+/** Auflösung / Überspringen / neuer Zug / Raum verlassen: hart stoppen. */
 export async function stopPlayback() {
   clearClipTimer();
   playGen += 1;
@@ -210,20 +371,26 @@ export async function stopPlayback() {
   const was = playStatus;
   playStatus = "idle";
   const id = localDeviceId();
-  if (!id) return;
-  if (was === "idle") {
+  if (!id) {
+    keepAlive = false;
+    acceptedCueId = "";
+    return;
+  }
+  if (!keepAlive && was === "idle") {
     try {
       const playing = await deviceIsPlaying();
-      if (!playing) return;
+      if (!playing) {
+        acceptedCueId = "";
+        return;
+      }
     } catch {
+      acceptedCueId = "";
       return;
     }
   }
-  try {
-    await pause(id);
-  } catch (err) {
-    if (!isDeviceMissingError(err)) console.error("[zeitsprung] Stop", err);
-  }
+  logDiagnose("Stop – Pause, Repeat aus, Lautstärke zurück");
+  await pauseAndRestore(id, "Stop");
+  acceptedCueId = "";
 }
 
 function playTarget(cue) {
@@ -266,22 +433,21 @@ export async function playCue(cue, { onSleep, onError, onUnavailable } = {}) {
   if (playStatus === "starting" || playStatus === "playing") {
     return { ok: false, reason: "busy" };
   }
-  playStatus = "starting";
-  const gen = (playGen += 1);
-  const age = Date.now() - (Number(cue.sentAt) || 0);
-  if (age > CUE_MAX_AGE_MS) {
+  const accepted = acceptCueOnArrival(cue);
+  if (!accepted.ok) {
     playStatus = "idle";
-    logDiagnose(`Befehl verpasst (${Math.round(age / 1000)}s alt)`);
     lastCueId = cue.cueId || lastCueId;
     return { ok: false, reason: "stale" };
   }
+  playStatus = "starting";
+  const gen = (playGen += 1);
   if (isMuted()) {
     playStatus = "idle";
     logDiagnose("Stumm – Song nicht gestartet");
     return { ok: false, reason: "muted" };
   }
   lastCueId = cue.cueId || lastCueId;
-  logDiagnose("Abspielen ausgelöst");
+  logDiagnose("Abspielen ausgelöst (angenommener Cue, kein Alters-Limit)");
   clearClipTimer();
   const stillMine = () => gen === playGen;
   const run = async () => {
@@ -303,6 +469,11 @@ export async function playCue(cue, { onSleep, onError, onUnavailable } = {}) {
       return { ok: false, reason: slept ? "sleep" : "error" };
     }
     const target = playTarget(cue);
+    if (keepAlive) {
+      logDiagnose("Vor dem Song: Repeat aus, Lautstärke bleibt 0 bis Play sitzt");
+      await liftKeepAlive(id, { restoreVol: false });
+      keepAliveSupportsVolume = true;
+    }
     logDiagnose(`Play mit position_ms=${target.positionMs} (kein Seek als Standardweg)`);
     let result;
     try {
@@ -338,6 +509,9 @@ export async function playCue(cue, { onSleep, onError, onUnavailable } = {}) {
       logDiagnose(`Seek-Notlösung fehlgeschlagen: ${explainError(err)}`);
     }
     if (!stillMine()) return { ok: false, reason: "aborted" };
+    if (keepAliveSupportsVolume) await restoreVolume(id);
+    keepAlive = false;
+    if (!stillMine()) return { ok: false, reason: "aborted" };
     playStatus = "playing";
     armClipTimer(cue);
     return { ok: true };
@@ -350,6 +524,8 @@ export async function playCue(cue, { onSleep, onError, onUnavailable } = {}) {
     playStatus = "idle";
     console.error("[zeitsprung] Abspielen", err);
     logDiagnose(explainError(err));
+    const restoreId = localDeviceId();
+    if (restoreId && keepAliveSupportsVolume) await restoreVolume(restoreId);
     if (err?.code === "track-unavailable") {
       logDiagnose("Schlaf-Prüfung: nicht zuständig (falscher/fehlender Song)");
       onUnavailable?.(cue, err);
