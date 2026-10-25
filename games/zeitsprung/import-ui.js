@@ -27,6 +27,7 @@ let list = null;
 let variants = [];
 let filterQuery = "";
 let onlySuspicious = false;
+let onlyUnplayable = false;
 let statusText = "";
 let statusBad = false;
 let saving = false;
@@ -82,6 +83,7 @@ function visibleSongs() {
   const q = filterQuery.trim().toLowerCase();
   return songRows().filter((song) => {
     if (onlySuspicious && !song.suspicious) return false;
+    if (onlyUnplayable && !song.unplayable) return false;
     if (!q) return true;
     const year = String(effectiveYear(song));
     return (
@@ -349,6 +351,7 @@ async function selectVariant(playlistId) {
     if (!String(list.name || "").trim()) list.name = DEFAULT_VARIANT_NAME;
     filterQuery = "";
     onlySuspicious = false;
+    onlyUnplayable = false;
     correctionPreview = null;
     setStatus(`„${list.name}“ geladen`);
     paint({ fromSelection: true, scrollToSongs: true });
@@ -520,13 +523,18 @@ function paintList(container) {
   for (const song of rows) {
     const row = el(
       "article",
-      `zs-song${song.suspicious ? " is-suspect" : ""}${song.excluded ? " is-excluded" : ""}`
+      `zs-song${song.suspicious ? " is-suspect" : ""}${song.excluded ? " is-excluded" : ""}${
+        song.unplayable ? " is-unplayable" : ""
+      }`
     );
     const top = el("div", "zs-song-top");
     top.append(el("strong", "zs-song-title", song.title));
     top.append(el("span", "zs-song-artist", song.artist || "–"));
     row.append(top);
     row.append(el("p", "zs-song-album", song.album || "–"));
+    if (song.unplayable) {
+      row.append(el("p", "note is-bad zs-unplayable-flag", "Nicht abspielbar (Spotify findet den Song nicht in der Playlist)"));
+    }
     if (song.suspicious) {
       row.append(el("p", "note is-bad zs-suspect-flag", "Verdächtiges Jahr (Remaster/Compilation/…)"));
     }
@@ -561,18 +569,28 @@ function paintList(container) {
       persist();
     });
     tools.append(exclude);
+    if (song.unplayable) {
+      const playable = el("button", "btn", "Wieder spielbar");
+      playable.type = "button";
+      playable.addEventListener("click", () => {
+        song.unplayable = false;
+        persist();
+      });
+      tools.append(playable);
+    }
     row.append(tools);
     table.append(row);
   }
   container.append(table);
   const stats = songRows();
   const excluded = stats.filter((s) => s.excluded).length;
+  const unplayable = stats.filter((s) => s.unplayable).length;
   const suspects = stats.filter((s) => s.suspicious && !s.excluded).length;
   container.append(
     el(
       "p",
       "note",
-      `${stats.length} Songs · ${excluded} ausgeschlossen · ${suspects} verdächtig · sichtbar ${rows.length}`
+      `${stats.length} Songs · ${excluded} ausgeschlossen · ${unplayable} nicht abspielbar · ${suspects} verdächtig · sichtbar ${rows.length}`
     )
   );
 }
@@ -592,6 +610,8 @@ function paint(opts = {}) {
   filterQuery = keepQuery;
   const keepSuspect = app.querySelector("[name=only-suspect]")?.checked ?? onlySuspicious;
   onlySuspicious = keepSuspect;
+  const keepUnplayable = app.querySelector("[name=only-unplayable]")?.checked ?? onlyUnplayable;
+  onlyUnplayable = keepUnplayable;
   const keepImport = app.querySelector("[name=corrections]")?.value || correctionPreview?.raw || "";
 
   /* Bei Variantenwechsel Felder aus der Liste, nicht aus dem alten DOM */
@@ -756,6 +776,17 @@ function paint(opts = {}) {
       });
       suspectRow.append(suspect, el("span", "", "Nur verdächtige Jahre"));
       filters.append(suspectRow);
+      const unplayRow = el("label", "switch-row");
+      const unplay = document.createElement("input");
+      unplay.type = "checkbox";
+      unplay.name = "only-unplayable";
+      unplay.checked = onlyUnplayable;
+      unplay.addEventListener("change", () => {
+        onlyUnplayable = unplay.checked;
+        paintList(app.querySelector("[data-song-list]"));
+      });
+      unplayRow.append(unplay, el("span", "", "Nur nicht abspielbar"));
+      filters.append(unplayRow);
       body.append(filters);
 
       const io = el("div", "btn-row zs-io");

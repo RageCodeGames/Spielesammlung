@@ -6,10 +6,12 @@ import {
   logDiagnose,
   pause,
   playViaPlaylist,
+  seekPlayback,
   setPreferredDeviceId,
 } from "../../shared/spotify.js";
 import { isMuted } from "../../shared/mute-button.js";
 import { CUE_MAX_AGE_MS } from "./rules.js";
+import { computeStartMs, START_MODE_RANDOM } from "./logic.js";
 
 const SLEEP_HINT = "Dein Spotify schläft – öffne kurz Spotify und tippe auf Bereit";
 
@@ -163,7 +165,41 @@ export async function stopPlayback() {
   }
 }
 
-export async function playCue(cue, { onSleep, onError } = {}) {
+function playTarget(cue) {
+  const position = Number.isFinite(Number(cue?.playlistIndex))
+    ? Math.max(0, Math.floor(Number(cue.playlistIndex)))
+    : undefined;
+  return {
+    trackUri: cue.trackUri,
+    position,
+    positionMs: Math.max(0, Math.floor(Number(cue.positionMs) || 0)),
+    trackId: cue.trackId || "",
+    title: cue.title || "",
+    artist: cue.artist || "",
+  };
+}
+
+async function jumpToCueStart(cue, playback, deviceId) {
+  const known = Math.max(0, Math.floor(Number(cue?.positionMs) || 0));
+  let startMs = known;
+  if (startMs <= 0 && (cue?.startMode || START_MODE_RANDOM) === START_MODE_RANDOM) {
+    const duration = Number(playback?.durationMs) || 0;
+    startMs = computeStartMs(duration, cue?.clipSec, START_MODE_RANDOM, cue?.startRatio);
+    if (startMs > 0) {
+      logDiagnose(`Länge nachträglich ${duration}ms – springe auf ${startMs}ms`);
+    }
+  }
+  if (startMs <= 0) return;
+  const progress = Number(playback?.progressMs) || 0;
+  if (Math.abs(progress - startMs) <= 2500) {
+    logDiagnose(`Startpunkt ${startMs}ms bereits nahe (${progress}ms) – kein Seek`);
+    return;
+  }
+  logDiagnose(`Seek auf ${startMs}ms (Stand ${progress}ms)`);
+  await seekPlayback(startMs, deviceId);
+}
+
+export async function playCue(cue, { onSleep, onError, onUnavailable } = {}) {
   if (!cue?.trackUri || !cue?.playlistUri) return { ok: false, reason: "bad-cue" };
   if (playStatus === "starting" || playStatus === "playing") {
     return { ok: false, reason: "busy" };
@@ -198,8 +234,10 @@ export async function playCue(cue, { onSleep, onError } = {}) {
       onSleep?.(SLEEP_HINT);
       return { ok: false, reason: "sleep" };
     }
+    const target = playTarget(cue);
+    let result;
     try {
-      await playViaPlaylist(cue.playlistUri, { trackUri: cue.trackUri }, id);
+      result = await playViaPlaylist(cue.playlistUri, target, id);
     } catch (err) {
       if (isDeviceMissingError(err)) {
         await refreshPlayDevices();
@@ -210,10 +248,16 @@ export async function playCue(cue, { onSleep, onError } = {}) {
           onSleep?.(SLEEP_HINT);
           return { ok: false, reason: "sleep" };
         }
-        await playViaPlaylist(cue.playlistUri, { trackUri: cue.trackUri }, id);
+        result = await playViaPlaylist(cue.playlistUri, target, id);
       } else {
         throw err;
       }
+    }
+    if (!stillMine()) return { ok: false, reason: "aborted" };
+    try {
+      await jumpToCueStart(cue, result?.state, id);
+    } catch (err) {
+      logDiagnose(`Seek fehlgeschlagen: ${explainError(err)}`);
     }
     if (!stillMine()) return { ok: false, reason: "aborted" };
     playStatus = "playing";
@@ -229,8 +273,9 @@ export async function playCue(cue, { onSleep, onError } = {}) {
     console.error("[zeitsprung] Abspielen", err);
     logDiagnose(explainError(err));
     if (isDeviceMissingError(err)) onSleep?.(SLEEP_HINT);
+    else if (err?.code === "track-unavailable") onUnavailable?.(cue, err);
     else onError?.(explainError(err));
-    return { ok: false, reason: "error", err };
+    return { ok: false, reason: err?.code === "track-unavailable" ? "unavailable" : "error", err };
   } finally {
     if (stillMine()) playWait = null;
   }

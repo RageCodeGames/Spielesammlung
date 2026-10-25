@@ -38,8 +38,11 @@ import {
   pauseForHost,
   playerName,
   proposePlace,
+  replaceUnavailableSong,
   resumeHost,
   skipSong,
+  START_MODE_RANDOM,
+  START_MODE_START,
   summarizeSettings,
   tapCard,
 } from "./logic.js";
@@ -70,7 +73,7 @@ import {
   TOKEN_START_OPTIONS,
   VARIANT_PREFS_KEY,
 } from "./rules.js";
-import { listSonglists, loadSonglist } from "./songlist-store.js";
+import { listSonglists, loadSonglist, markSongUnplayable } from "./songlist-store.js";
 
 const app = document.getElementById("app");
 const orientation = mountOrientation("portrait");
@@ -115,6 +118,8 @@ let lastAimedGap = null;
 let dragStop = null;
 /** Cue-ID, für die der Umdreh-Hinweis schon weg kann (Song lief). */
 let flipHintDoneCue = "";
+let lastUnavailableCue = "";
+let lastNotice = "";
 
 initUpdates();
 
@@ -157,13 +162,24 @@ function myId() {
   return onlineApi?.getPlayerId?.() || onlineRoom?.you?.id || null;
 }
 
-function toast(message) {
+function dismissToast() {
+  clearTimeout(toastTimer);
+  toastTimer = 0;
   document.querySelector(".toast")?.remove();
+}
+
+function toast(message) {
+  dismissToast();
   const node = el("div", "toast", message);
   node.setAttribute("role", "status");
+  node.addEventListener("click", dismissToast);
   document.body.append(node);
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => node.remove(), 1800);
+  toastTimer = setTimeout(() => node.remove(), 4000);
+}
+
+function clearPlayError() {
+  sleepHint = "";
+  dismissToast();
 }
 
 function reportError(context, err) {
@@ -580,6 +596,21 @@ function renderSettings(container, { settings, onChange }) {
   }
   container.append(clips);
 
+  container.append(el("h2", "group-label", "Startpunkt"));
+  const starts = el("div", "btn-row");
+  for (const [mode, label] of [
+    [START_MODE_RANDOM, "Zufällig"],
+    [START_MODE_START, "Anfang"],
+  ]) {
+    const on = current.startMode === mode;
+    const button = el("button", on ? "btn primary" : "btn", label);
+    button.type = "button";
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+    button.addEventListener("click", () => onChange({ ...current, startMode: mode }));
+    starts.append(button);
+  }
+  container.append(starts);
+
   container.append(el("h2", "group-label", "Start-Tokens"));
   const toks = el("div", "btn-row");
   for (const n of TOKEN_START_OPTIONS) {
@@ -634,6 +665,7 @@ async function enterLobby() {
       mix: Boolean(prefs?.mix) && prefIds.length >= 1,
       goal: 10,
       clipSec: 30,
+      startMode: START_MODE_RANDOM,
       startTokens: TOKEN_START_DEFAULT,
       challengeOn: true,
     });
@@ -790,6 +822,13 @@ function adoptState(next) {
     /* Clip-Timer weiterlaufen lassen; nur Abspiel-Sperre öffnen */
     resetPlayGate("");
   }
+  if (
+    (next?.cue?.cueId && next.cue.cueId !== prevCue) ||
+    next?.activeId !== prevActive ||
+    (next?.phase !== "listen" && next?.phase !== "turn")
+  ) {
+    sleepHint = "";
+  }
   state = next;
   syncOrientation();
   renderPlay();
@@ -798,6 +837,12 @@ function adoptState(next) {
   if (next?.cue?.cueId && next.cue.cueId !== prevCue) handleIncomingCue(next.cue);
   else if (shouldStopPlayback(prevPhase, prevActive, prevCue, next)) {
     stopPlayback();
+  }
+  if (next?.notice && next.notice !== lastNotice) {
+    lastNotice = next.notice;
+    toast(next.notice);
+  } else if (!next?.notice) {
+    lastNotice = "";
   }
   ensureHostCue();
 }
@@ -812,7 +857,10 @@ function handleAction(action) {
     if (action.type === "play-card") next = tapCard(state, secrets, from);
     else if (action.type === "place") next = proposePlace(state, secrets, from, p.gap);
     else if (action.type === "skip") next = skipSong(state, secrets, from);
-    else if (action.type === "buy") next = buyCard(state, secrets, from);
+    else if (action.type === "song-unavailable") {
+      await applyUnavailableSong(p);
+      return;
+    } else if (action.type === "buy") next = buyCard(state, secrets, from);
     else if (action.type === "challenge") next = claimChallenge(state, from);
     else if (action.type === "challenge-aim") next = aimChallenge(state, from, p.gap);
     else if (action.type === "challenge-place") next = challengePlace(state, secrets, from, p.gap);
@@ -837,9 +885,11 @@ function handleAction(action) {
 async function rematchNow() {
   if (!onlineRoom) return;
   lastHandledCue = "";
+  lastUnavailableCue = "";
+  lastNotice = "";
   pendingCue = null;
   selectedGap = null;
-  sleepHint = "";
+  clearPlayError();
   stopFlip();
   await stopPlayback();
   const settings = normalizeSettings(onlineRoom.settings || state);
@@ -876,6 +926,57 @@ function patchTimers() {
   if (!node || (state?.phase !== "challenge" && state?.phase !== "challenge-place")) return;
   const left = Math.max(0, Math.ceil((state.challengeUntil - Date.now()) / 1000));
   node.textContent = `${left}s`;
+}
+
+function playlistIdFromCue(cue) {
+  return String(cue?.playlistUri || "")
+    .replace(/^spotify:playlist:/i, "")
+    .trim();
+}
+
+async function applyUnavailableSong(payload = {}) {
+  const cue = state?.cue;
+  const cueId = payload.cueId || "";
+  if (!cueId || lastUnavailableCue === cueId) return;
+  if (cue?.cueId && cueId !== cue.cueId) return;
+  const trackId = payload.trackId || cue?.trackId || secrets?.current?.id || "";
+  const playlistId = payload.playlistId || playlistIdFromCue(cue) || secrets?.current?.playlistId || "";
+  const next = replaceUnavailableSong(state, secrets);
+  if (next.error && !next.state) return;
+  lastUnavailableCue = cueId;
+  if (next.state) await publish(next.state, next.secrets);
+  if (playlistId && trackId) {
+    try {
+      await markSongUnplayable(playlistId, trackId);
+    } catch (err) {
+      console.error("[zeitsprung] nicht abspielbar", err);
+    }
+  }
+}
+
+function reportUnavailable(cue) {
+  if (!cue?.cueId) return;
+  send("song-unavailable", {
+    cueId: cue.cueId,
+    trackId: cue.trackId || "",
+    playlistId: playlistIdFromCue(cue),
+  });
+}
+
+function playCueHandlers() {
+  return {
+    onSleep: (msg) => {
+      sleepHint = msg;
+      renderPlay();
+    },
+    onError: (msg) => {
+      sleepHint = msg;
+      renderPlay();
+    },
+    onUnavailable: (cue) => {
+      reportUnavailable(cue);
+    },
+  };
 }
 
 function send(type, payload) {
@@ -935,16 +1036,7 @@ function playPendingCue() {
   }
   const status = localPlayStatus();
   if (status === "starting" || status === "playing") return;
-  playCue(cue, {
-    onSleep: (msg) => {
-      sleepHint = msg;
-      renderPlay();
-    },
-    onError: (msg) => {
-      sleepHint = msg;
-      renderPlay();
-    },
-  }).then((result) => {
+  playCue(cue, playCueHandlers()).then((result) => {
     if (result?.ok) markFlipHintDone(cue);
     renderPlay();
   });
@@ -1022,6 +1114,7 @@ async function handleIncomingCue(cue) {
   const fresh = cue.cueId !== lastHandledCue;
   if (fresh) {
     lastHandledCue = cue.cueId;
+    sleepHint = "";
     resetPlayGate(cue.cueId);
     if (flipHintDoneCue && flipHintDoneCue !== cue.cueId) flipHintDoneCue = "";
   }
@@ -1030,12 +1123,7 @@ async function handleIncomingCue(cue) {
   startFlipWatch();
   if (fresh && !flipPlayEnabled()) {
     logDiagnose("Cue empfangen – starte ohne Umdrehen");
-    const result = await playCue(cue, {
-      onSleep: (msg) => {
-        sleepHint = msg;
-        renderPlay();
-      },
-    });
+    const result = await playCue(cue, playCueHandlers());
     if (result?.ok) markFlipHintDone(cue);
     renderPlay();
   }
@@ -1317,7 +1405,16 @@ function renderPlayView() {
   side.append(tokenStrip());
   const center = el("div", "zs-center");
   const actions = el("div", "zs-actions");
-  if (sleepHint) center.append(el("p", "spotify-sleep-hint", sleepHint));
+  const hintText = sleepHint || "";
+  if (hintText) {
+    const hint = el("p", "spotify-sleep-hint", hintText);
+    hint.setAttribute("role", "status");
+    hint.addEventListener("click", () => {
+      sleepHint = "";
+      renderPlay();
+    });
+    center.append(hint);
+  }
 
   const phase = state.phase;
   const inChallenge = phase === "challenge" || phase === "challenge-place";

@@ -16,7 +16,9 @@ const PKCE_KEY = "kajuete:spotify-pkce";
 const DEVICE_KEY = "kajuete:spotify-device";
 const REFRESH_MARGIN_MS = 60_000;
 const TRANSFER_WAIT_MS = 1000;
-const VERIFY_WAIT_MS = 1500;
+const VERIFY_FIRST_MS = 1500;
+const VERIFY_TOTAL_MS = 3000;
+const VERIFY_POLL_MS = 400;
 const DIAGNOSE_MAX = 60;
 const TRACK_ID_PATTERN = /^[A-Za-z0-9]{22}$/;
 
@@ -304,12 +306,17 @@ export async function transferPlayback(deviceId, shouldPlay = true) {
 export async function getPlayback() {
   const data = await api("GET", "/me/player");
   if (!data) return null;
+  const artists = Array.isArray(data.item?.artists) ? data.item.artists : [];
   return {
     deviceId: data.device?.id || "",
     deviceName: data.device?.name || "",
     isPlaying: data.is_playing === true,
     uri: data.item?.uri || "",
     linkedFromUri: data.item?.linked_from?.uri || "",
+    trackId: data.item?.id || "",
+    linkedFromId: data.item?.linked_from?.id || "",
+    title: data.item?.name || "",
+    artist: artists.map((row) => row?.name).filter(Boolean).join(", "),
     type: data.currently_playing_type || "",
     progressMs: Number(data.progress_ms) || 0,
     durationMs: Number(data.item?.duration_ms) || 0,
@@ -405,99 +412,134 @@ function playlistForbidden(err) {
   );
 }
 
+function trackUnavailable(err) {
+  return new SpotifyError(
+    "track-unavailable",
+    "Song nicht in der Playlist.",
+    err?.status || 0,
+    { reason: err?.reason || "NOT_IN_PLAYLIST", detail: err?.detail || "" }
+  );
+}
+
+function isPlayRejected(err) {
+  const deviceMissing = err?.reason === "NO_ACTIVE_DEVICE" || /device/i.test(err?.detail || "");
+  if ((err?.status === 404 && !deviceMissing) || err?.code === "forbidden") return "playlist";
+  if (err?.status === 400) return "offset";
+  return "";
+}
+
 /**
  * Song über Playlist-Kontext starten.
  * @param {string} playlistInput Playlist-Link oder -URI
- * @param {{ trackUri?: string, position?: number }} target Song-ID (offset.uri) oder Index ab 0 (offset.position)
+ * @param {{ trackUri?: string, position?: number, positionMs?: number, trackId?: string, title?: string, artist?: string }} target
  */
 export async function playViaPlaylist(playlistInput, target, deviceId) {
   const parsed = parsePlaylistInput(playlistInput);
   if (!parsed.uri) throw new SpotifyError("bad-playlist", parsed.error);
   let trackUri = "";
-  let offset;
   if (target?.trackUri) {
     const track = parseTrackInput(target.trackUri);
     if (!track.uri) throw new SpotifyError("bad-track", track.error);
     trackUri = track.uri;
-    offset = { uri: trackUri };
-  } else {
-    offset = { position: Math.max(0, Math.floor(Number(target?.position) || 0)) };
   }
+  const playlistIndex = Number.isFinite(Number(target?.position))
+    ? Math.max(0, Math.floor(Number(target.position)))
+    : null;
+  const positionMs = Math.max(0, Math.floor(Number(target?.positionMs) || 0));
+  const expected = {
+    uri: trackUri,
+    id: target?.trackId || trackIdFromUri(trackUri),
+    title: target?.title || "",
+    artist: target?.artist || "",
+  };
 
   await ensureDeviceReady(deviceId);
   await disableShuffleRepeat(deviceId);
 
-  const body = { context_uri: parsed.uri, offset, position_ms: 0 };
   const playPath = `/me/player/play?device_id=${encodeURIComponent(deviceId)}`;
-  note(`Sende: PUT ${playPath} · Body=${JSON.stringify(body)}`);
-  try {
+  const sendPlay = async (offset, label) => {
+    const body = { context_uri: parsed.uri, offset, position_ms: positionMs };
+    note(`Sende (${label}): PUT ${playPath} · Body=${JSON.stringify(body)}`);
     await api("PUT", playPath, body);
+    return Date.now();
+  };
+
+  let offset = trackUri
+    ? { uri: trackUri }
+    : { position: playlistIndex == null ? 0 : playlistIndex };
+  let acceptedAt;
+  try {
+    acceptedAt = await sendPlay(offset, offset.uri ? "uri" : "position");
   } catch (err) {
-    const deviceMissing = err?.reason === "NO_ACTIVE_DEVICE" || /device/i.test(err?.detail || "");
-    if ((err?.status === 404 && !deviceMissing) || err?.code === "forbidden") throw playlistForbidden(err);
-    if (err?.status === 400) {
-      throw new SpotifyError(
-        "playlist-bad",
-        `Spotify lehnt Playlist oder Startpunkt ab${err.detail ? ` (${err.detail})` : ""}. Ist der Song in der Playlist bzw. die Position gültig?`,
-        400,
-        { reason: err.reason || "", path: playPath }
-      );
+    const kind = isPlayRejected(err);
+    if (kind === "playlist") throw playlistForbidden(err);
+    if (kind === "offset" && offset.uri && playlistIndex != null) {
+      note("Entscheidung: offset.uri abgelehnt – versuche offset.position laut Songliste");
+      offset = { position: playlistIndex };
+      try {
+        acceptedAt = await sendPlay(offset, "position");
+      } catch (again) {
+        if (isPlayRejected(again) === "playlist") throw playlistForbidden(again);
+        note("Entscheidung: offset.position ebenfalls abgelehnt – Song nicht verfügbar");
+        throw trackUnavailable(again);
+      }
+    } else if (kind === "offset") {
+      note("Entscheidung: Play abgelehnt (400) – Song nicht verfügbar");
+      throw trackUnavailable(err);
+    } else {
+      throw err;
+    }
+  }
+
+  const first = await confirmPlayback(expected, deviceId, "Prüfung 1");
+  if (first) return { acceptedAt, retried: false, state: first, offset };
+
+  note("Entscheidung: nach 3 s nichts oder falscher Song – Play maximal einmal wiederholen");
+  try {
+    acceptedAt = await sendPlay(offset, "wiederholt");
+  } catch (err) {
+    const kind = isPlayRejected(err);
+    if (kind === "playlist") throw playlistForbidden(err);
+    if (kind === "offset") {
+      note("Entscheidung: Wiederholung abgelehnt – Song nicht verfügbar");
+      throw trackUnavailable(err);
     }
     throw err;
   }
-  const acceptedAt = Date.now();
+  const second = await confirmPlayback(expected, deviceId, "Prüfung 2");
+  if (second) return { acceptedAt, retried: true, state: second, offset };
 
-  const sent = `Sende: PUT ${playPath} · Body=${JSON.stringify(body)}`;
-  await sleep(VERIFY_WAIT_MS);
-  if (trackUri) {
-    const first = await verifyPlaying(trackUri, deviceId, "Prüfung Playlist 1");
-    if (first) return { acceptedAt, retried: false, state: first };
-    note("Falscher Track oder gestoppt – Play einmal wiederholen");
-    note(sent);
-    await api("PUT", playPath, body);
-    const retryAt = Date.now();
-    await sleep(VERIFY_WAIT_MS);
-    const second = await verifyPlaying(trackUri, deviceId, "Prüfung Playlist 2");
-    if (second) return { acceptedAt: retryAt, retried: true, state: second };
-    throw new SpotifyError(
-      "not-playing",
-      `Playlist-Play angenommen, aber genau dieser Song läuft nicht. Ist er in der Playlist? Sonst: ${PLAYLIST_PUBLIC_HINT}.`,
-      0,
-      { reason: "NOT_PLAYING" }
-    );
+  if (offset.uri && playlistIndex != null) {
+    note("Entscheidung: URI trifft den Song nicht – versuche offset.position laut Songliste");
+    offset = { position: playlistIndex };
+    try {
+      acceptedAt = await sendPlay(offset, "position-fallback");
+    } catch (err) {
+      if (isPlayRejected(err) === "playlist") throw playlistForbidden(err);
+      note("Entscheidung: offset.position fehlgeschlagen – Song nicht verfügbar");
+      throw trackUnavailable(err);
+    }
+    const third = await confirmPlayback(expected, deviceId, "Prüfung Position");
+    if (third) return { acceptedAt, retried: true, state: third, offset };
   }
 
-  const state = await checkPlayback("Prüfung Playlist 1");
-  const ok = Boolean(state?.isPlaying && state.uri);
-  note(
-    `Prüfung Playlist: ${ok ? "läuft ✓" : "läuft nicht"} (item.uri: ${state?.uri ? "ja" : "leer"}, spielt: ${
-      state?.isPlaying ? "ja" : "nein"
-    })`,
-    { status: ok ? "ok" : "fehlt" }
-  );
-  if (ok) return { acceptedAt, retried: false, state };
-
-  note("Nichts läuft – Play einmal wiederholen");
-  note(sent);
-  await api("PUT", playPath, body);
-  const retryAt = Date.now();
-  await sleep(VERIFY_WAIT_MS);
-  const again = await checkPlayback("Prüfung Playlist 2");
-  const ok2 = Boolean(again?.isPlaying && again.uri);
-  note(
-    `Prüfung Playlist 2: ${ok2 ? "läuft ✓" : "läuft nicht"} (item.uri: ${again?.uri ? "ja" : "leer"}, spielt: ${
-      again?.isPlaying ? "ja" : "nein"
-    })`,
-    { status: ok2 ? "ok" : "fehlt" }
-  );
-  if (ok2) return { acceptedAt: retryAt, retried: true, state: again };
-
+  note("Entscheidung: nach Wiederholung immer noch nichts/falsch – Song nicht verfügbar");
   throw new SpotifyError(
-    "not-playing",
-    `Playlist-Play angenommen, aber es läuft nichts. Position prüfen. Falls die Playlist privat ist: ${PLAYLIST_PUBLIC_HINT}.`,
+    "track-unavailable",
+    "Song nicht in der Playlist.",
     0,
-    { reason: "NOT_PLAYING" }
+    { reason: "NOT_IN_PLAYLIST" }
   );
+}
+
+/** PUT /me/player/seek – Sprung in den laufenden Song. */
+export async function seekPlayback(positionMs, deviceId) {
+  const ms = Math.max(0, Math.floor(Number(positionMs) || 0));
+  const query = [`position_ms=${ms}`];
+  if (deviceId) query.push(`device_id=${encodeURIComponent(deviceId)}`);
+  const path = `/me/player/seek?${query.join("&")}`;
+  note(`Sende: PUT ${path}`);
+  await api("PUT", path);
 }
 
 /** Playlist-Zeile: seit Feb 2026 `item`, vorher `track` – beides akzeptieren. */
@@ -509,7 +551,7 @@ function playlistRowTrack(row) {
 /**
  * Playlist-Metadaten und alle Tracks laden (paginiert).
  * Development Mode: GET /playlists/{id}/items (nicht mehr /tracks).
- * @returns {Promise<{ id: string, title: string, tracks: Array<{ id: string, uri: string, title: string, artist: string, year: number, album: string, albumType: string }> }>}
+ * @returns {Promise<{ id: string, title: string, tracks: Array<{ id: string, uri: string, title: string, artist: string, year: number, album: string, albumType: string, durationMs: number, playlistIndex: number }> }>}
  */
 export async function fetchPlaylistCatalog(playlistInput) {
   const parsed = parsePlaylistInput(playlistInput);
@@ -524,7 +566,7 @@ export async function fetchPlaylistCatalog(playlistInput) {
   let skipped = 0;
   // item = neuer Name (Feb 2026), track = Fallback für ältere Antworten
   const fields = encodeURIComponent(
-    "items(item(id,uri,name,type,artists(name),album(name,release_date,album_type)),track(id,uri,name,type,artists(name),album(name,release_date,album_type))),next"
+    "items(item(id,uri,name,duration_ms,type,artists(name),album(name,release_date,album_type)),track(id,uri,name,duration_ms,type,artists(name),album(name,release_date,album_type))),next"
   );
   for (;;) {
     const page = await api(
@@ -535,8 +577,9 @@ export async function fetchPlaylistCatalog(playlistInput) {
     if (offset === 0 && !items.length && page && page.items == null) {
       note("Playlist-Antwort ohne items – oft fremde Playlist (seit März 2026 nur eigene/Mitbearbeitung)");
     }
-    for (const row of items) {
-      const track = playlistRowTrack(row);
+    for (let i = 0; i < items.length; i += 1) {
+      const playlistIndex = offset + i;
+      const track = playlistRowTrack(items[i]);
       if (!track?.id) {
         skipped += 1;
         continue;
@@ -562,6 +605,8 @@ export async function fetchPlaylistCatalog(playlistInput) {
         year,
         album: track.album?.name || "",
         albumType: track.album?.album_type || "",
+        durationMs: Math.max(0, Math.floor(Number(track.duration_ms) || 0)),
+        playlistIndex,
       });
     }
     if (!page?.next || items.length < limit) break;
@@ -575,18 +620,100 @@ export async function fetchPlaylistCatalog(playlistInput) {
   return { id, title, tracks };
 }
 
-async function verifyPlaying(uri, deviceId, label) {
+function trackIdFromUri(uri) {
+  const match = String(uri || "").match(/track:([A-Za-z0-9]{22})/i);
+  return match ? match[1] : "";
+}
+
+function foldText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** Richtiger Song: URI, linked_from, Track-ID oder Titel+Interpret. */
+function matchPlaybackTrack(state, expected) {
+  if (!state) return { match: false, how: "kein Stand" };
+  const wantUri = expected?.uri || "";
+  const wantId = expected?.id || trackIdFromUri(wantUri);
+  const gotId = state.trackId || trackIdFromUri(state.uri);
+  const linkedId = state.linkedFromId || trackIdFromUri(state.linkedFromUri);
+  if (wantUri && state.uri === wantUri) return { match: true, how: "item.uri" };
+  if (wantUri && state.linkedFromUri === wantUri) return { match: true, how: "linked_from.uri" };
+  if (wantId && gotId === wantId) return { match: true, how: "track-id" };
+  if (wantId && linkedId === wantId) return { match: true, how: "linked_from-id" };
+  const wantTitle = foldText(expected?.title);
+  const wantArtist = foldText(expected?.artist);
+  if (wantTitle && wantArtist && foldText(state.title) === wantTitle && foldText(state.artist) === wantArtist) {
+    return { match: true, how: "titel+interpret" };
+  }
+  if (!wantUri && !wantId) {
+    return { match: Boolean(state.uri), how: state.uri ? "irgendein track" : "kein track" };
+  }
+  return { match: false, how: "anders" };
+}
+
+async function inspectPlayback(expected, deviceId, label) {
   const state = await checkPlayback(label);
-  const rightTrack = Boolean(state && (state.uri === uri || state.linkedFromUri === uri));
+  const match = matchPlaybackTrack(state, expected);
   const rightDevice = !state?.deviceId || state.deviceId === deviceId;
-  const ok = Boolean(state && rightTrack && state.isPlaying && rightDevice);
   note(
-    `${label}: ${ok ? "läuft ✓" : "läuft nicht"} (richtiger Track: ${rightTrack ? "ja" : "nein"}, spielt: ${
+    `${label}: Track ${match.match ? `passt (${match.how})` : `passt nicht (${match.how})`} · is_playing=${
       state?.isPlaying ? "ja" : "nein"
-    }, Gerät: ${rightDevice ? "ja" : "anderes"})`,
-    { status: ok ? "ok" : "fehlt" }
+    } · Gerät ${rightDevice ? "ok" : "anderes"}`,
+    { status: match.match && state?.isPlaying ? "ok" : "offen" }
   );
-  return ok ? state : null;
+  return { state, match, rightDevice };
+}
+
+/**
+ * Nach Play prüfen: richtiger Song reicht auch ohne is_playing (Puffern).
+ * Nur null, wenn nach 3 s nichts oder ein falscher Song läuft.
+ */
+async function confirmPlayback(expected, deviceId, label) {
+  await sleep(VERIFY_FIRST_MS);
+  const started = Date.now() - VERIFY_FIRST_MS;
+  let last = await inspectPlayback(expected, deviceId, `${label} nach 1,5 s`);
+  const ready = () => last.match.match && last.rightDevice && last.state?.isPlaying;
+  if (ready()) {
+    note(`${label}: Entscheidung = läuft – kein erneutes Play`);
+    return last.state;
+  }
+  if (last.match.match && !last.state?.isPlaying) {
+    note(`${label}: richtiger Song, is_playing=false (Puffern) – bis 3 s warten, kein Play`);
+  } else if (!last.state) {
+    note(`${label}: nichts aktiv – bis 3 s warten, dann ggf. einmal neu starten`);
+  } else if (!last.match.match) {
+    note(`${label}: anderer Song – bis 3 s warten, dann ggf. einmal neu starten`);
+  } else if (!last.rightDevice) {
+    note(`${label}: anderes Gerät – bis 3 s warten`);
+  }
+
+  while (Date.now() - started < VERIFY_TOTAL_MS) {
+    await sleep(VERIFY_POLL_MS);
+    last = await inspectPlayback(expected, deviceId, `${label} erneut`);
+    if (ready()) {
+      note(`${label}: Entscheidung = läuft nach Warten – kein erneutes Play`);
+      return last.state;
+    }
+    if (last.match.match && !last.state?.isPlaying) {
+      note(`${label}: immer noch Puffern`);
+    }
+  }
+
+  if (last.match.match && last.rightDevice) {
+    note(
+      `${label}: Entscheidung = richtiger Song (is_playing=${last.state?.isPlaying ? "ja" : "nein"}) – kein erneutes Play`
+    );
+    return last.state;
+  }
+  note(
+    `${label}: Entscheidung = ${last.state ? "falscher Song" : "nichts läuft"} – erneutes Play nur wenn noch nicht wiederholt`
+  );
+  return null;
 }
 
 let idlePauseNoted = false;

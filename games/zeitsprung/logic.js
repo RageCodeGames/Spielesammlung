@@ -13,12 +13,16 @@ import {
   TOKEN_START_OPTIONS,
 } from "./rules.js";
 
+export const START_MODE_START = "start";
+export const START_MODE_RANDOM = "random";
+
 export function defaultSettings() {
   return {
     playlistIds: [],
     mix: false,
     goal: 10,
     clipSec: 30,
+    startMode: START_MODE_RANDOM,
     startTokens: TOKEN_START_DEFAULT,
     challengeOn: true,
   };
@@ -40,11 +44,34 @@ export function normalizeSettings(raw) {
     mix: unique.length >= 2 ? true : raw.mix === true,
     goal: GOAL_OPTIONS.includes(raw.goal) ? raw.goal : base.goal,
     clipSec: raw.clipSec === 0 ? 0 : 30,
+    startMode: raw.startMode === START_MODE_START ? START_MODE_START : START_MODE_RANDOM,
     startTokens: TOKEN_START_OPTIONS.includes(Number(raw.startTokens))
       ? Number(raw.startTokens)
       : base.startTokens,
     challengeOn: raw.challengeOn !== false,
   };
+}
+
+/**
+ * Startposition im Song.
+ * Zufällig 20–60 % der Länge; 30-s-Clips behalten ≥ 35 s bis zum Ende.
+ */
+export function computeStartMs(durationMs, clipSec, startMode, ratio) {
+  const duration = Math.max(0, Math.floor(Number(durationMs) || 0));
+  if (startMode !== START_MODE_RANDOM || duration <= 0) return 0;
+  if (!Number.isFinite(Number(ratio))) return 0;
+  const r = Math.min(0.6, Math.max(0.2, Number(ratio)));
+  const minStart = Math.floor(duration * 0.2);
+  let maxStart = Math.floor(duration * 0.6);
+  if (Number(clipSec) === 30) {
+    maxStart = Math.min(maxStart, duration - 35_000);
+  } else {
+    maxStart = Math.min(maxStart, Math.max(0, duration - 3_000));
+  }
+  if (maxStart <= 0) return 0;
+  if (maxStart < minStart) return maxStart;
+  const wanted = Math.floor(duration * r);
+  return Math.min(maxStart, Math.max(minStart, wanted));
 }
 
 /** Wirklicher Mix erst ab zwei Varianten – eine Auswahl = normale Variante. */
@@ -93,7 +120,8 @@ export function summarizeSettings(raw, catalogs = []) {
     label = "Keine Songliste";
   }
   const clip = s.clipSec ? `${s.clipSec}s` : "ganzer Song";
-  return `${label}${songBit} · ${s.goal} Karten · ${clip} · ${s.startTokens} Token${s.challengeOn ? " · Herausfordern" : ""}`;
+  const start = s.startMode === START_MODE_START ? "Anfang" : "zufällig";
+  return `${label}${songBit} · ${s.goal} Karten · ${clip} · ${start} · ${s.startTokens} Token${s.challengeOn ? " · Herausfordern" : ""}`;
 }
 
 export function clone(value) {
@@ -114,6 +142,9 @@ function packSong(song, fallbackPlaylistId = "", fallbackVariant = "") {
   const id = String(song.id || "").trim();
   if (!id) return null;
   const playlistId = String(song.playlistId || fallbackPlaylistId || "").trim();
+  const playlistIndex = Number.isFinite(Number(song.playlistIndex))
+    ? Math.max(0, Math.floor(Number(song.playlistIndex)))
+    : null;
   return {
     id,
     uri: String(song.uri || "").trim() || `spotify:track:${id}`,
@@ -122,6 +153,8 @@ function packSong(song, fallbackPlaylistId = "", fallbackVariant = "") {
     year: Number(song.year) || 0,
     playlistId,
     variantName: String(song.variantName || fallbackVariant || DEFAULT_VARIANT_NAME),
+    durationMs: Math.max(0, Math.floor(Number(song.durationMs) || 0)),
+    playlistIndex,
   };
 }
 
@@ -130,7 +163,7 @@ export function playableFromList(list) {
   const variantName = list?.name || DEFAULT_VARIANT_NAME;
   const out = [];
   for (const song of Object.values(list?.songs || {})) {
-    if (!song?.id || song.excluded) continue;
+    if (!song?.id || song.excluded || song.unplayable) continue;
     const year = effectiveYear(song);
     if (!year) continue;
     const packed = packSong({ ...song, year, playlistId: song.playlistId || playlistId }, playlistId, variantName);
@@ -224,6 +257,7 @@ export function migrateState(data) {
       waitingForHost: false,
       goal: 10,
       clipSec: 30,
+      startMode: START_MODE_RANDOM,
       startTokens: TOKEN_START_DEFAULT,
       challengeOn: true,
       mix: false,
@@ -239,6 +273,7 @@ export function migrateState(data) {
       reveal: null,
       winnerId: null,
       discardCount: 0,
+      notice: "",
     },
   });
   next.players = mapPlayers(next.players);
@@ -250,6 +285,7 @@ export function migrateState(data) {
   next.timelines = mapTimelines(next.timelines, next.players);
   next.goal = GOAL_OPTIONS.includes(next.goal) ? next.goal : 10;
   next.clipSec = next.clipSec === 0 ? 0 : 30;
+  next.startMode = next.startMode === START_MODE_START ? START_MODE_START : START_MODE_RANDOM;
   if (!next.activeId) next.activeId = next.order[next.turnIndex % next.order.length] || "";
   return next;
 }
@@ -298,6 +334,7 @@ function setActive(state, playerId) {
   state.turnIndex = idx < 0 ? 0 : idx;
   state.played = false;
   state.cue = null;
+  state.notice = "";
   state.proposedGap = null;
   state.challengerId = null;
   state.challengeGap = null;
@@ -318,7 +355,7 @@ export function dealCue(state, secrets) {
   if (!sec.current) return { error: "no-card" };
   if (s.phase === "listen" && s.cue && s.played) return { state: s, secrets: sec };
   const fallback = readArray(s.playlistIds).length === 1 ? s.playlistIds[0] : "";
-  const cue = makeCue(sec.current, s.clipSec, fallback);
+  const cue = makeCue(sec.current, s.clipSec, fallback, s.startMode);
   if (!cue) {
     return {
       error: "no-uri",
@@ -386,6 +423,7 @@ export function beginMatch(roomPlayers, settings, songs, rng = Math.random) {
     phase: "turn",
     goal: s.goal,
     clipSec: s.clipSec,
+    startMode: s.startMode,
     startTokens: s.startTokens,
     challengeOn: s.challengeOn,
     mix: effectiveMix(s),
@@ -409,19 +447,32 @@ export function beginMatch(roomPlayers, settings, songs, rng = Math.random) {
   return { state: dealt.state || state, secrets: dealt.secrets || secrets };
 }
 
-export function makeCue(song, clipSec, fallbackPlaylistId = "") {
+export function makeCue(song, clipSec, fallbackPlaylistId = "", startMode = START_MODE_RANDOM) {
   const packed = packSong(song, fallbackPlaylistId);
   const playlistId = packed?.playlistId || String(fallbackPlaylistId || "").trim();
   const trackUri = packed?.uri || "";
   if (!playlistId || !trackUri) return null;
   const sentAt = Date.now();
-  return {
+  const mode = startMode === START_MODE_START ? START_MODE_START : START_MODE_RANDOM;
+  const durationMs = packed.durationMs || 0;
+  const startRatio = mode === START_MODE_RANDOM ? 0.2 + Math.random() * 0.4 : 0;
+  const positionMs = computeStartMs(durationMs, clipSec, mode, startRatio);
+  const cue = {
     cueId: `${sentAt}-${Math.random().toString(36).slice(2, 8)}`,
     playlistUri: `spotify:playlist:${playlistId}`,
     trackUri,
+    trackId: packed.id,
+    title: packed.title,
+    artist: packed.artist,
+    durationMs,
+    startMode: mode,
+    startRatio,
+    positionMs,
     sentAt,
     clipSec: Number(clipSec) || 0,
   };
+  if (packed.playlistIndex != null) cue.playlistIndex = packed.playlistIndex;
+  return cue;
 }
 
 /** Früher: Karte antippen. Cue kommt jetzt automatisch – Funktion bleibt für Alt-Clients. */
@@ -449,6 +500,30 @@ export function skipSong(state, secrets, fromId) {
     return { state: s, secrets: drawn.secrets };
   }
   return startPlayerTurn(s, drawn.secrets, fromId);
+}
+
+/** Song nicht abspielbar: neuen ziehen, ohne Token. */
+export function replaceUnavailableSong(state, secrets) {
+  const s = migrateState(state);
+  const sec = normalizeSecrets(secrets);
+  if (s.phase !== "turn" && s.phase !== "listen") return { error: "not-now" };
+  const badId = sec.current?.id || "";
+  s.discardCount = (s.discardCount || 0) + 1;
+  if (badId) {
+    sec.deck = sec.deck.filter((song) => song.id !== badId);
+    sec.used = { ...sec.used, [badId]: 1 };
+  }
+  const drawn = drawSong({ ...sec, current: null });
+  if (!drawn.song) {
+    s.phase = "end";
+    s.winnerId = s.winnerId || longestPlayer(s);
+    s.cue = null;
+    s.notice = "Song nicht verfügbar – neuer Song";
+    return { state: s, secrets: drawn.secrets };
+  }
+  const next = startPlayerTurn(s, drawn.secrets, s.activeId);
+  if (next.state) next.state.notice = "Song nicht verfügbar – neuer Song";
+  return next;
 }
 
 export function buyCard(state, secrets, fromId) {
