@@ -16,3 +16,5 @@ export const DEFAULT_VARIANT_NAME = "Rock";
 export const DEV_NAMES = ["Nia", "Rolo", "Mira", "Timo", "Suri", "Kale", "Pim", "Vela", "Juno", "Pax"];
 export const CUE_MAX_AGE_MS = 20_000;
 export const FLIP_KEY = "kajuete:zeitsprung-flip-play";
+/** Letzte Varianten-/Mix-Auswahl des Hosts */
+export const VARIANT_PREFS_KEY = "kajuete:zeitsprung-variant-prefs";

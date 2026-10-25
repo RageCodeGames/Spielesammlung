@@ -1,5 +1,6 @@
 import { isMuted, mountMuteButton, setMuted } from "../../shared/mute-button.js";
 import { mountOrientation, preferredForPlayPhase } from "../../shared/orientation.js";
+import { get, set } from "../../shared/storage.js";
 import { requestWakeLock, releaseWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
 import {
@@ -27,6 +28,8 @@ import {
   finishReveal,
   firstValidGap,
   migrateState,
+  countUniqueSongs,
+  effectiveMix,
   mixCatalogs,
   normalizeSecrets,
   normalizeSettings,
@@ -64,6 +67,7 @@ import {
   SKIP_COST,
   TOKEN_START_DEFAULT,
   TOKEN_START_OPTIONS,
+  VARIANT_PREFS_KEY,
 } from "./rules.js";
 import { listSonglists, loadSonglist } from "./songlist-store.js";
 
@@ -455,45 +459,95 @@ function lobbyExtras(container, { room, isHost, refresh }) {
   publishStatus();
 }
 
+function rememberVariantPrefs(settings) {
+  const s = normalizeSettings(settings);
+  set(VARIANT_PREFS_KEY, {
+    mix: s.mix === true || s.playlistIds.length >= 2,
+    playlistIds: s.playlistIds,
+  });
+}
+
+function loadVariantPrefs() {
+  const raw = get(VARIANT_PREFS_KEY, null);
+  if (!raw || typeof raw !== "object") return null;
+  const ids = Array.isArray(raw.playlistIds)
+    ? raw.playlistIds.map((id) => String(id || "").trim()).filter(Boolean)
+    : [];
+  return {
+    mix: raw.mix === true || ids.length >= 2,
+    playlistIds: [...new Set(ids)],
+  };
+}
+
+function applyVariantChange(current, patch, onChange) {
+  const next = normalizeSettings({ ...current, ...patch });
+  rememberVariantPrefs(next);
+  onChange(next);
+}
+
 function renderSettings(container, { settings, onChange }) {
   const current = normalizeSettings(settings);
   container.append(el("h2", "group-label", "Songliste / Variante"));
   if (!catalogs.length) {
     container.append(el("p", "note is-bad", "Keine Variante gespeichert. Zuerst eine Songliste importieren."));
   }
+  const mixOn = current.mix === true || current.playlistIds.length >= 2;
   const mixRow = el("label", "switch-row");
   const mixBox = document.createElement("input");
   mixBox.type = "checkbox";
-  mixBox.checked = current.mix || current.playlistIds.length > 1;
+  mixBox.checked = mixOn;
   mixBox.addEventListener("change", () => {
-    const ids = mixBox.checked ? current.playlistIds : current.playlistIds.slice(0, 1);
-    onChange({ ...current, playlistIds: ids, mix: mixBox.checked });
+    if (mixBox.checked) {
+      applyVariantChange(current, { mix: true, playlistIds: current.playlistIds }, onChange);
+      return;
+    }
+    applyVariantChange(
+      current,
+      { mix: false, playlistIds: current.playlistIds.slice(0, 1) },
+      onChange
+    );
   });
-  mixRow.append(mixBox, el("span", "", "Mix (mehrere Varianten)"));
+  mixRow.append(mixBox, el("span", "", "Mix (Varianten einzeln anhaken)"));
   container.append(mixRow);
-  const mixOn = mixBox.checked;
-  for (const cat of catalogs) {
-    const row = el("label", "switch-row");
-    const box = document.createElement("input");
-    box.type = mixOn ? "checkbox" : "radio";
-    box.name = mixOn ? `zs-var-${cat.playlistId}` : "zs-variant";
-    box.checked = current.playlistIds.includes(cat.playlistId);
-    box.addEventListener("change", () => {
-      if (!mixOn) {
-        onChange({ ...current, playlistIds: [cat.playlistId], mix: false });
-        return;
-      }
-      const ids = new Set(current.playlistIds);
-      if (box.checked) ids.add(cat.playlistId);
-      else ids.delete(cat.playlistId);
-      const next = [...ids];
-      onChange({ ...current, playlistIds: next, mix: true });
-    });
-    row.append(box, el("span", "", `${cat.name} (${cat.songCount} Songs)`));
-    container.append(row);
-  }
+
   if (mixOn) {
-    container.append(el("p", "note", "Songs werden zusammengemischt, ohne doppelte Titel. Jeder Song kommt aus seiner Playlist."));
+    container.append(el("p", "note", "Mindestens zwei Varianten wählen. Doppelte Songs nur einmal, Wiedergabe aus der Herkunfts-Playlist."));
+    for (const cat of catalogs) {
+      const row = el("label", "switch-row");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.name = `zs-mix-${cat.playlistId}`;
+      box.checked = current.playlistIds.includes(cat.playlistId);
+      box.addEventListener("change", () => {
+        const ids = new Set(current.playlistIds);
+        if (box.checked) ids.add(cat.playlistId);
+        else ids.delete(cat.playlistId);
+        applyVariantChange(current, { mix: true, playlistIds: [...ids] }, onChange);
+      });
+      row.append(box, el("span", "", `${cat.name} (${cat.songCount} Songs)`));
+      container.append(row);
+    }
+    const n = current.playlistIds.length;
+    const unique = countUniqueSongs(current.playlistIds, catalogs);
+    if (n < 2) {
+      container.append(el("p", "note is-bad", "Noch mindestens eine weitere Variante anhaken – sonst gilt eine normale Variante."));
+    } else {
+      container.append(el("p", "note", `Mix gesamt: ${unique} Songs (ohne Doppelte, ${n} Varianten)`));
+    }
+  } else {
+    for (const cat of catalogs) {
+      const row = el("label", "switch-row");
+      const box = document.createElement("input");
+      box.type = "radio";
+      box.name = "zs-variant";
+      box.checked = current.playlistIds[0] === cat.playlistId;
+      box.addEventListener("change", () => {
+        if (!box.checked) return;
+        applyVariantChange(current, { mix: false, playlistIds: [cat.playlistId] }, onChange);
+      });
+      row.append(box, el("span", "", `${cat.name} (${cat.songCount} Songs)`));
+      container.append(row);
+    }
   }
 
   container.append(el("h2", "group-label", "Ziel"));
@@ -563,9 +617,18 @@ async function enterLobby() {
     });
     await refreshPlayDevices().catch(() => {});
     lobbyHandle?.destroy();
+    const prefs = loadVariantPrefs();
+    const known = new Set(catalogs.map((row) => row.playlistId));
+    const prefIds = (prefs?.playlistIds || []).filter((id) => known.has(id));
     const initial = normalizeSettings({
-      playlistIds: catalogs[0] ? [catalogs[0].playlistId] : [],
-      mix: false,
+      playlistIds: prefIds.length
+        ? prefs.mix && prefIds.length >= 1
+          ? prefIds
+          : prefIds.slice(0, 1)
+        : catalogs[0]
+          ? [catalogs[0].playlistId]
+          : [],
+      mix: Boolean(prefs?.mix) && prefIds.length >= 1,
       goal: 10,
       clipSec: 30,
       startTokens: TOKEN_START_DEFAULT,
@@ -588,9 +651,14 @@ async function enterLobby() {
       },
       async onBeforeStart(room) {
         const settings = normalizeSettings(room.settings);
-        if (!settings.playlistIds.length) throw new Error("Bitte mindestens eine Variante wählen.");
+        const ids = effectiveMix(settings) ? settings.playlistIds : settings.playlistIds.slice(0, 1);
+        if (!ids.length) throw new Error("Bitte mindestens eine Variante wählen.");
+        if (settings.mix && ids.length < 2) {
+          /* Mix-Intent mit nur einer Liste → normale Variante */
+        }
+        rememberVariantPrefs({ ...settings, playlistIds: ids, mix: ids.length >= 2 });
         const lists = [];
-        for (const id of settings.playlistIds) {
+        for (const id of ids) {
           const list = await loadSonglist(id);
           if (list) lists.push(list);
         }
@@ -599,7 +667,7 @@ async function enterLobby() {
         if (songs.length < need) {
           throw new Error(`Zu wenige Songs in der Auswahl (${songs.length}, nötig ca. ${need}).`);
         }
-        const match = beginMatch(room.players, settings, songs);
+        const match = beginMatch(room.players, { ...settings, playlistIds: ids, mix: ids.length >= 2 }, songs);
         secrets = match.secrets;
         await onlineApi.writeAllSecrets(packSecrets(match.secrets));
         await onlineApi.setState(match.state);

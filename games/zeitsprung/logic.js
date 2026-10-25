@@ -33,9 +33,11 @@ export function normalizeSettings(raw) {
       ? [String(raw.playlistId)]
       : [];
   const unique = [...new Set(ids)];
+  /* Mix-Flag bleibt in der Lobby, solange der Host den Modus an hat;
+     fürs Spiel gilt: Mix nur bei ≥ 2 Listen (siehe effectiveMix). */
   return {
     playlistIds: unique,
-    mix: unique.length > 1 ? true : raw.mix === true,
+    mix: unique.length >= 2 ? true : raw.mix === true,
     goal: GOAL_OPTIONS.includes(raw.goal) ? raw.goal : base.goal,
     clipSec: raw.clipSec === 0 ? 0 : 30,
     startTokens: TOKEN_START_OPTIONS.includes(Number(raw.startTokens))
@@ -45,18 +47,53 @@ export function normalizeSettings(raw) {
   };
 }
 
+/** Wirklicher Mix erst ab zwei Varianten – eine Auswahl = normale Variante. */
+export function effectiveMix(settings) {
+  const s = normalizeSettings(settings);
+  return s.playlistIds.length >= 2;
+}
+
+/** Eindeutige spielbare Tracks über die gewählten Varianten (nach Track-ID). */
+export function countUniqueSongs(playlistIds, catalogs = []) {
+  const ids = Array.isArray(playlistIds) ? playlistIds : [];
+  const seen = new Set();
+  let fallback = 0;
+  for (const id of ids) {
+    const cat = catalogs.find((row) => row.playlistId === id);
+    if (!cat) continue;
+    const trackIds = Array.isArray(cat.playableIds) ? cat.playableIds : null;
+    if (trackIds) {
+      for (const tid of trackIds) {
+        if (tid) seen.add(String(tid));
+      }
+    } else {
+      fallback += Number(cat.songCount) || 0;
+    }
+  }
+  return seen.size || fallback;
+}
+
 export function summarizeSettings(raw, catalogs = []) {
   const s = normalizeSettings(raw);
   const names = s.playlistIds
     .map((id) => catalogs.find((row) => row.playlistId === id)?.name)
     .filter(Boolean);
-  const label = names.length
-    ? names.join(" + ")
-    : s.playlistIds.length
-      ? `${s.playlistIds.length} Listen`
-      : "Keine Songliste";
+  const songN = countUniqueSongs(s.playlistIds, catalogs);
+  const songBit = songN ? ` · ${songN} Songs` : "";
+  let label;
+  if (s.playlistIds.length >= 2) {
+    label = names.length
+      ? `Mix: ${names.join(" + ")}`
+      : `Mix: ${s.playlistIds.length} Varianten`;
+  } else if (names.length) {
+    label = names[0];
+  } else if (s.playlistIds.length) {
+    label = "1 Variante";
+  } else {
+    label = "Keine Songliste";
+  }
   const clip = s.clipSec ? `${s.clipSec}s` : "ganzer Song";
-  return `${label} · ${s.goal} Karten · ${clip} · ${s.startTokens} Token${s.challengeOn ? " · Herausfordern" : ""}`;
+  return `${label}${songBit} · ${s.goal} Karten · ${clip} · ${s.startTokens} Token${s.challengeOn ? " · Herausfordern" : ""}`;
 }
 
 export function clone(value) {
@@ -318,8 +355,8 @@ export function beginMatch(roomPlayers, settings, songs, rng = Math.random) {
     clipSec: s.clipSec,
     startTokens: s.startTokens,
     challengeOn: s.challengeOn,
-    mix: s.mix,
-    playlistIds: s.playlistIds,
+    mix: effectiveMix(s),
+    playlistIds: effectiveMix(s) ? s.playlistIds : s.playlistIds.slice(0, 1),
     variantNames: [...new Set(songs.map((song) => song.variantName).filter(Boolean))],
     players,
     order,

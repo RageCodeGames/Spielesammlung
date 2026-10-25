@@ -137,12 +137,15 @@ export async function listSonglists() {
           console.error("[zeitsprung] Variantenname", err);
         }
       }
-      const playable = Object.values(list.songs).filter((song) => !song.excluded && (song.yearOverride || song.year)).length;
+      const playableIds = Object.values(list.songs)
+        .filter((song) => !song.excluded && (song.yearOverride || song.year))
+        .map((song) => String(song.id));
       out.push({
         playlistId: list.playlistId,
         name: list.name || DEFAULT_VARIANT_NAME,
         title: list.title,
-        songCount: playable,
+        songCount: playableIds.length,
+        playableIds,
         updatedAt: list.updatedAt,
       });
     }
