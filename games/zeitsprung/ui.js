@@ -1,5 +1,5 @@
 import { isMuted, mountMuteButton, setMuted } from "../../shared/mute-button.js";
-import { mountOrientation } from "../../shared/orientation.js";
+import { mountOrientation, preferredForPlayPhase } from "../../shared/orientation.js";
 import { requestWakeLock, releaseWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
 import {
@@ -51,6 +51,11 @@ import { listSonglists, loadSonglist } from "./songlist-store.js";
 const app = document.getElementById("app");
 const orientation = mountOrientation("portrait");
 const VIEW_KEY = "kajuete:zs-view";
+
+/** Orientierung nur aus der Spielphase – nicht pro Bildschirm. */
+function syncOrientation() {
+  orientation.setPreferred(preferredForPlayPhase(state?.phase));
+}
 
 let session = getStoredSession();
 let bootError = "";
@@ -174,7 +179,6 @@ function clearSubs() {
 async function leaveOnline() {
   clearSubs();
   releaseWakeLock();
-  orientation.setPreferred("portrait");
   try {
     await onlineApi?.leaveRoom?.();
   } catch (err) {
@@ -185,6 +189,7 @@ async function leaveOnline() {
   leavingUi = false;
   leftHandled = new Set();
   pendingCue = null;
+  syncOrientation();
 }
 
 async function askLeaveRoom() {
@@ -249,7 +254,8 @@ async function publishStatus() {
 
 function renderBoot() {
   rememberView("boot");
-  orientation.setPreferred("portrait");
+  state = null;
+  syncOrientation();
   releaseWakeLock();
   const view = el("section", "screen setup");
   const body = el("div", "screen-body");
@@ -274,7 +280,8 @@ function renderBoot() {
 
 function openImport() {
   rememberView("import");
-  orientation.setPreferred("portrait");
+  state = null;
+  syncOrientation();
   showImport(app, {
     session,
     bootError,
@@ -470,7 +477,8 @@ async function enterLobby() {
   if (entering && lobbyHandle) return;
   entering = true;
   rememberView("lobby");
-  orientation.setPreferred("landscape");
+  state = null;
+  syncOrientation();
   try {
     const [lobbyMod, api] = await Promise.all([
       import("../../shared/lobby.js"),
@@ -529,13 +537,15 @@ async function enterLobby() {
       onLeave() {
         lobbyHandle = null;
         entering = false;
-        orientation.setPreferred("portrait");
+        state = null;
+        syncOrientation();
         renderBoot();
       },
     });
   } catch (err) {
     entering = false;
-    orientation.setPreferred("portrait");
+    state = null;
+    syncOrientation();
     reportError("Lobby", err);
     renderBoot();
   }
@@ -548,7 +558,7 @@ function beginPlay(room) {
     entering = false;
     onlineRoom = room;
     if (room?.state) state = migrateState(room.state);
-    orientation.setPreferred("landscape");
+    syncOrientation();
     requestWakeLock();
     clearSubs();
     unsubRoom = onlineApi.onRoomChange((next) => {
@@ -599,6 +609,7 @@ function adoptState(next) {
   const prevPhase = state?.phase;
   if (next?.phase !== prevPhase) selectedGap = null;
   state = next;
+  syncOrientation();
   renderPlay();
   armTick();
   scheduleBots();
@@ -781,7 +792,8 @@ async function runBots() {
 
 function showCrash(err) {
   reportError("Online-Spiel", err);
-  orientation.setPreferred("portrait");
+  state = null;
+  syncOrientation();
   const view = el("section", "screen setup");
   const body = el("div", "screen-body");
   body.append(backLink());

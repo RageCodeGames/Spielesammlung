@@ -2,12 +2,25 @@
  * Orientierungshinweis für Spiele.
  * Manifest ist "any"; jedes Spiel wählt portrait oder landscape
  * und kann während der Session umschalten (z. B. Zeitsprung).
+ *
+ * Spiele mit Phasen-Wechsel setzen die Orientierung zentral über
+ * `preferredForPlayPhase` / `setPreferred`, nicht pro Bildschirmseite.
  */
 
 const HINTS = {
   portrait: "Bitte Handy hochkant halten",
   landscape: "Bitte Handy quer halten",
 };
+
+/**
+ * Querformat nur während einer laufenden Spielphase (nicht Lobby, nicht Ende).
+ * @param {string|null|undefined} phase
+ * @returns {"portrait" | "landscape"}
+ */
+export function preferredForPlayPhase(phase) {
+  if (!phase || phase === "end") return "portrait";
+  return "landscape";
+}
 
 /**
  * @param {"portrait" | "landscape"} preferred
