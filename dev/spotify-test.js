@@ -21,9 +21,12 @@ import {
   login,
   logout,
   onDiagnose,
+  parsePlaylistInput,
   parseTrackInput,
   pause,
   play,
+  playViaPlaylist,
+  playViaQueue,
   redirectUri,
   resume,
   setPreferredDeviceId,
@@ -120,6 +123,51 @@ async function resumeHere() {
   }
 }
 
+function paintPlaylistPreview() {
+  const node = app.querySelector("[data-playlist-preview]");
+  const input = app.querySelector("[name=playlist]");
+  if (!node || !input) return;
+  if (!input.value.trim()) {
+    showNote(node, "");
+    return;
+  }
+  const { uri, error } = parsePlaylistInput(input.value);
+  showNote(node, uri ? `Wird gesendet als: ${uri}` : error, !uri);
+}
+
+/** Gemeinsamer Start: Lag, Hinweis, Countdown – für play / Warteschlange / Playlist. */
+async function startHere(runner, clip, sentAt) {
+  muted = isMuted();
+  const lagNode = app.querySelector("[data-lag]");
+  const hint = app.querySelector("[data-local-hint]");
+  if (muted) {
+    stopCountdown();
+    if (lagNode) lagNode.textContent = "Stumm – nicht abgespielt";
+    showNote(hint, "Dieses Gerät ist stumm.");
+    return;
+  }
+  const id = selectedDeviceId();
+  if (!id) {
+    showNote(hint, NO_DEVICE_HINT, true);
+    if (lagNode) lagNode.textContent = "";
+    return;
+  }
+  const t0 = Number(sentAt) || Date.now();
+  if (lagNode) lagNode.textContent = "Starte …";
+  try {
+    const result = await runner(id);
+    const lag = (result?.acceptedAt || Date.now()) - t0;
+    if (lagNode) {
+      lagNode.textContent = `Abspielen bestätigt nach ${lag} ms${result?.retried ? " (nach Wiederholung)" : ""}`;
+    }
+    showNote(hint, "");
+    startCountdown(clip);
+  } catch (err) {
+    if (lagNode) lagNode.textContent = "";
+    showError(hint, err, "Abspielen");
+  }
+}
+
 function paintDiagnose(rows) {
   const pre = app.querySelector("[data-diagnose]");
   if (!pre) return;
@@ -188,35 +236,15 @@ async function pauseHere() {
 }
 
 async function playHere(trackUri, startMs, clip, sentAt) {
-  muted = isMuted();
-  const lagNode = app.querySelector("[data-lag]");
-  const hint = app.querySelector("[data-local-hint]");
-  if (muted) {
-    stopCountdown();
-    if (lagNode) lagNode.textContent = "Stumm – nicht abgespielt";
-    showNote(hint, "Dieses Gerät ist stumm.");
-    return;
-  }
-  const id = selectedDeviceId();
-  if (!id) {
-    showNote(hint, NO_DEVICE_HINT, true);
-    if (lagNode) lagNode.textContent = "";
-    return;
-  }
-  const t0 = Number(sentAt) || Date.now();
-  if (lagNode) lagNode.textContent = "Starte …";
-  try {
-    const result = await play(trackUri, id, startMs);
-    const lag = (result?.acceptedAt || Date.now()) - t0;
-    if (lagNode) {
-      lagNode.textContent = `Abspielen bestätigt nach ${lag} ms${result?.retried ? " (nach Wiederholung)" : ""}`;
-    }
-    showNote(hint, "");
-    startCountdown(clip);
-  } catch (err) {
-    if (lagNode) lagNode.textContent = "";
-    showError(hint, err, "Abspielen");
-  }
+  await startHere((id) => play(trackUri, id, startMs), clip, sentAt);
+}
+
+async function playQueueHere(trackUri, clip, sentAt) {
+  await startHere((id) => playViaQueue(trackUri, id), clip, sentAt);
+}
+
+async function playPlaylistHere(playlistInput, position, clip, sentAt) {
+  await startHere((id) => playViaPlaylist(playlistInput, position, id), clip, sentAt);
 }
 
 async function refreshDevices() {
@@ -434,6 +462,8 @@ function showRoomPlay(initial) {
 
 function render() {
   const keepTrack = app.querySelector("[name=track]")?.value || "";
+  const keepPlaylist = app.querySelector("[name=playlist]")?.value || "";
+  const keepOffset = app.querySelector("[name=playlist-offset]")?.value || "0";
   const keepClip = clipSec;
   lobby?.destroy();
   lobby = null;
@@ -603,8 +633,65 @@ function render() {
         testBtn.disabled = false;
       }
     });
-    tests.append(resumeBtn, testBtn);
+    const queueBtn = el("button", "btn", "Über Warteschlange");
+    queueBtn.type = "button";
+    queueBtn.addEventListener("click", async () => {
+      const { uri, error } = trackFromInput();
+      if (!uri) {
+        showNote(hint, error, true);
+        return;
+      }
+      queueBtn.disabled = true;
+      try {
+        await playQueueHere(uri, clipSec, Date.now());
+      } finally {
+        queueBtn.disabled = false;
+      }
+    });
+    tests.append(resumeBtn, testBtn, queueBtn);
     body.append(tests);
+
+    body.append(el("h2", "lobby-list-title", "Über Playlist"));
+    const plLabel = el("label", "lobby-field", "Playlist-Link");
+    const plInput = el("input", "text-input");
+    plInput.name = "playlist";
+    plInput.placeholder = "https://open.spotify.com/playlist/…";
+    plInput.autocomplete = "off";
+    plInput.spellcheck = false;
+    plInput.value = keepPlaylist;
+    plInput.addEventListener("input", paintPlaylistPreview);
+    plLabel.append(plInput);
+    body.append(plLabel);
+    const plPreview = el("p", "note spotify-uri");
+    plPreview.setAttribute("data-playlist-preview", "1");
+    plPreview.hidden = true;
+    body.append(plPreview);
+    const offsetLabel = el("label", "lobby-field", "Position (ab 0)");
+    const offsetInput = el("input", "text-input");
+    offsetInput.name = "playlist-offset";
+    offsetInput.type = "number";
+    offsetInput.min = "0";
+    offsetInput.step = "1";
+    offsetInput.value = keepOffset;
+    offsetLabel.append(offsetInput);
+    body.append(offsetLabel);
+    const playlistBtn = el("button", "btn", "Über Playlist");
+    playlistBtn.type = "button";
+    playlistBtn.addEventListener("click", async () => {
+      const { uri, error } = parsePlaylistInput(plInput.value);
+      if (!uri) {
+        showNote(hint, error, true);
+        return;
+      }
+      const pos = Math.max(0, Math.floor(Number(offsetInput.value) || 0));
+      playlistBtn.disabled = true;
+      try {
+        await playPlaylistHere(uri, pos, clipSec, Date.now());
+      } finally {
+        playlistBtn.disabled = false;
+      }
+    });
+    body.append(playlistBtn);
   }
 
   appendDiagnose(body);
@@ -622,6 +709,7 @@ function render() {
   muted = isMuted();
   showLobby();
   paintTrackPreview();
+  paintPlaylistPreview();
   if (session) refreshDevices();
 }
 

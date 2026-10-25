@@ -15,6 +15,7 @@ const PKCE_KEY = "kajuete:spotify-pkce";
 const DEVICE_KEY = "kajuete:spotify-device";
 const REFRESH_MARGIN_MS = 60_000;
 const TRANSFER_WAIT_MS = 1000;
+const QUEUE_WAIT_MS = 800;
 const VERIFY_WAIT_MS = 1500;
 const DIAGNOSE_MAX = 60;
 const TRACK_ID_PATTERN = /^[A-Za-z0-9]{22}$/;
@@ -112,6 +113,50 @@ export function parseTrackInput(input) {
 
 export function parseTrackUri(input) {
   return parseTrackInput(input).uri;
+}
+
+/**
+ * Playlist-Link oder URI → `spotify:playlist:<22 Zeichen>`.
+ * @returns {{ uri: string, error: string }}
+ */
+export function parsePlaylistInput(input) {
+  const raw = String(input || "").trim();
+  if (!raw) {
+    return { uri: "", error: "Bitte einen Spotify-Playlist-Link einfügen (open.spotify.com/playlist/…)." };
+  }
+  let id = "";
+  const colon = raw.match(/^spotify:playlist:([^?#\s/]*)/i);
+  if (colon) {
+    id = colon[1];
+  } else {
+    let path = raw.split(/[?#]/)[0];
+    try {
+      const url = new URL(raw);
+      if (!/(^|\.)spotify\.com$/i.test(url.hostname)) {
+        return {
+          uri: "",
+          error: "Nur open.spotify.com-Links gehen (keine Kurzlinks). Im Spotify-Menü „Link zur Playlist kopieren“ nutzen.",
+        };
+      }
+      path = url.pathname;
+    } catch {
+      /* kein vollständiger Link */
+    }
+    id = path.match(/\/playlist\/([^/]*)/i)?.[1] || "";
+    if (!id && /\/(track|album|artist|episode|show)\//i.test(path)) {
+      return { uri: "", error: "Das ist kein Playlist-Link." };
+    }
+  }
+  if (!id) {
+    return { uri: "", error: "Kein Playlist-Link erkannt. Erwartet: https://open.spotify.com/playlist/…" };
+  }
+  if (!TRACK_ID_PATTERN.test(id)) {
+    return {
+      uri: "",
+      error: `Ungültige Playlist-ID „${id}“ (${id.length} Zeichen) – nötig sind genau 22 Zeichen A–Z, a–z, 0–9.`,
+    };
+  }
+  return { uri: `spotify:playlist:${id}`, error: "" };
 }
 
 export function explainError(err) {
@@ -303,9 +348,47 @@ export async function resume(deviceId) {
   if (!deviceId) throw new SpotifyError("no-device", "Kein Gerät gewählt.");
   const path = `/me/player/play?device_id=${encodeURIComponent(deviceId)}`;
   note(`Fortsetzen: PUT ${path} · ohne Body`);
-  await api("PUT", path);
+  try {
+    await api("PUT", path);
+  } catch (err) {
+    if (err?.code === "restriction" || err?.reason === "RESTRICTION_VIOLATED") {
+      throw new SpotifyError(
+        "restriction",
+        "Restriction violated – vermutlich läuft schon etwas. In der Spotify-App prüfen oder kurz pausieren und nochmal versuchen.",
+        err.status || 403,
+        { reason: err.reason || "RESTRICTION_VIOLATED", path, detail: err.detail || "" }
+      );
+    }
+    throw err;
+  }
   await sleep(VERIFY_WAIT_MS);
   return checkPlayback("Prüfung Fortsetzen");
+}
+
+/** Gerät vorbereiten: aktiv → nichts, sonst Transfer mit play: true. */
+async function ensureDeviceReady(deviceId) {
+  if (!deviceId) {
+    throw new SpotifyError(
+      "no-device",
+      "Kein aktives Gerät gefunden. Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren."
+    );
+  }
+  const devices = await getDevices();
+  const target = devices.find((device) => device.id === deviceId);
+  if (!target) {
+    throw new SpotifyError(
+      "no-device",
+      "Das gewählte Gerät ist nicht mehr da. Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren."
+    );
+  }
+  if (target.active) {
+    note(`Gerät „${target.name}“ ist aktiv – kein Transfer`);
+  } else {
+    note(`Gerät „${target.name}“ nicht aktiv – Transfer mit play: true`);
+    await transferPlayback(deviceId, true);
+    await sleep(TRANSFER_WAIT_MS);
+  }
+  return target;
 }
 
 function sleep(ms) {
@@ -325,32 +408,11 @@ export async function play(trackUri, deviceId, startMs = 0) {
   const parsed = parseTrackInput(trackUri);
   if (!parsed.uri) throw new SpotifyError("bad-track", parsed.error);
   const uri = parsed.uri;
-  if (!deviceId) {
-    throw new SpotifyError(
-      "no-device",
-      "Kein aktives Gerät gefunden. Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren."
-    );
-  }
   const position = Math.max(0, Math.floor(Number(startMs) || 0));
   const body = { uris: [uri], position_ms: position };
   const playPath = `/me/player/play?device_id=${encodeURIComponent(deviceId)}`;
 
-  const devices = await getDevices();
-  const target = devices.find((device) => device.id === deviceId);
-  if (!target) {
-    throw new SpotifyError(
-      "no-device",
-      "Das gewählte Gerät ist nicht mehr da. Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren."
-    );
-  }
-
-  if (target.active) {
-    note(`Gerät „${target.name}“ ist aktiv – kein Transfer, direkt abspielen`);
-  } else {
-    note(`Gerät „${target.name}“ nicht aktiv – Transfer mit play: true`);
-    await transferPlayback(deviceId, true);
-    await sleep(TRANSFER_WAIT_MS);
-  }
+  await ensureDeviceReady(deviceId);
   const sent = `Sende: PUT ${playPath} · URI=${uri} · Body=${JSON.stringify(body)}`;
   note(sent);
   await api("PUT", playPath, body);
@@ -369,6 +431,75 @@ export async function play(trackUri, deviceId, startMs = 0) {
   throw new SpotifyError(
     "not-playing",
     "Spotify hat den Befehl angenommen, aber der Song läuft nicht. Spotify-App öffnen und nochmal versuchen.",
+    0,
+    { reason: "NOT_PLAYING" }
+  );
+}
+
+/**
+ * Alternative: Track in die Warteschlange legen und mit „Nächster Titel“ springen.
+ * Hilft, wenn PUT play mit uris das Gerät leer lässt.
+ */
+export async function playViaQueue(trackUri, deviceId) {
+  const parsed = parseTrackInput(trackUri);
+  if (!parsed.uri) throw new SpotifyError("bad-track", parsed.error);
+  const uri = parsed.uri;
+  await ensureDeviceReady(deviceId);
+
+  const queuePath = `/me/player/queue?uri=${encodeURIComponent(uri)}&device_id=${encodeURIComponent(deviceId)}`;
+  note(`Sende: POST ${queuePath} · kein Body · URI=${uri}`);
+  await api("POST", queuePath);
+  await sleep(QUEUE_WAIT_MS);
+
+  const nextPath = `/me/player/next?device_id=${encodeURIComponent(deviceId)}`;
+  note(`Sende: POST ${nextPath} · kein Body`);
+  await api("POST", nextPath);
+  const acceptedAt = Date.now();
+
+  await sleep(VERIFY_WAIT_MS);
+  if (await verifyPlaying(uri, deviceId, "Prüfung Warteschlange")) return { acceptedAt, retried: false };
+
+  throw new SpotifyError(
+    "not-playing",
+    "Warteschlange/Next angenommen, aber der Song läuft nicht. Spotify-App öffnen und nochmal versuchen.",
+    0,
+    { reason: "NOT_PLAYING" }
+  );
+}
+
+/**
+ * Alternative: Song über Playlist-Kontext starten (offset = Index ab 0).
+ */
+export async function playViaPlaylist(playlistInput, position, deviceId) {
+  const parsed = parsePlaylistInput(playlistInput);
+  if (!parsed.uri) throw new SpotifyError("bad-playlist", parsed.error);
+  const offset = Math.max(0, Math.floor(Number(position) || 0));
+  await ensureDeviceReady(deviceId);
+
+  const body = {
+    context_uri: parsed.uri,
+    offset: { position: offset },
+    position_ms: 0,
+  };
+  const playPath = `/me/player/play?device_id=${encodeURIComponent(deviceId)}`;
+  note(`Sende: PUT ${playPath} · Body=${JSON.stringify(body)}`);
+  await api("PUT", playPath, body);
+  const acceptedAt = Date.now();
+
+  await sleep(VERIFY_WAIT_MS);
+  const state = await checkPlayback("Prüfung Playlist");
+  const ok = Boolean(state?.isPlaying && state.uri);
+  note(
+    `Prüfung Playlist: ${ok ? "läuft ✓" : "läuft nicht"} (item.uri: ${state?.uri ? "ja" : "leer"}, spielt: ${
+      state?.isPlaying ? "ja" : "nein"
+    })`,
+    { status: ok ? "ok" : "fehlt" }
+  );
+  if (ok) return { acceptedAt, retried: false };
+
+  throw new SpotifyError(
+    "not-playing",
+    "Playlist-Play angenommen, aber es läuft nichts. Position prüfen oder in der Spotify-App starten.",
     0,
     { reason: "NOT_PLAYING" }
   );
