@@ -28,6 +28,27 @@ function el(tag, className, text) {
   return node;
 }
 
+let pressBound = false;
+
+/** Kurzer gedrückter Zustand auf Touch-Geräten, auf denen :active oft unsichtbar bleibt. */
+export function ensurePressFeedback() {
+  if (pressBound) return;
+  pressBound = true;
+  const down = (event) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    const btn = event.target.closest?.("button, .choice, a.back");
+    if (!btn || btn.disabled) return;
+    document.querySelectorAll(".is-pressed").forEach((node) => node.classList.remove("is-pressed"));
+    btn.classList.add("is-pressed");
+  };
+  const up = () => {
+    document.querySelectorAll(".is-pressed").forEach((node) => node.classList.remove("is-pressed"));
+  };
+  document.addEventListener("pointerdown", down, true);
+  document.addEventListener("pointerup", up, true);
+  document.addEventListener("pointercancel", up, true);
+}
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -194,10 +215,28 @@ export function mountLobby(root, options = {}) {
 
   function roomFingerprint(room) {
     if (!room) return "";
-    const players = room.players
-      .map((p) => `${p.id}:${p.name}:${p.online ? 1 : 0}:${p.seat}`)
+    const players = (room.players || [])
+      .map(
+        (p) =>
+          `${p.id}:${p.name}:${p.online ? 1 : 0}:${p.seat}:${p.dummy ? 1 : 0}:${p.spotifyStatus || ""}:${p.spotifyName || ""}:${p.spotifyUserId || ""}`
+      )
       .join("|");
-    return `${room.code}:${room.status}:${players}`;
+    let settingsKey = "";
+    try {
+      settingsKey = JSON.stringify(room.settings || {});
+    } catch {
+      settingsKey = String(room.settings || "");
+    }
+    return `${room.code}:${room.status}:${players}:${settingsKey}`;
+  }
+
+  function noteRenderError(area, err) {
+    console.error(`[lobby] Zeichnen (${area})`, err);
+    try {
+      options.onRenderError?.(area, err);
+    } catch (cbErr) {
+      console.error("[lobby] onRenderError", cbErr);
+    }
   }
 
   root.innerHTML = "";
@@ -246,8 +285,6 @@ export function mountLobby(root, options = {}) {
     }
     const finger = roomFingerprint(next);
     if (finger && finger === lastRoomFinger && body.querySelector(".lobby-code")) {
-      const sum = body.querySelector(".lobby-settings-sum");
-      if (sum && settingsPanel?.summarize) sum.textContent = settingsPanel.summarize(next.settings || {});
       if (leaveNote) hint(leaveNote);
       return;
     }
@@ -433,11 +470,38 @@ export function mountLobby(root, options = {}) {
     }
   }
 
+  function paintSettingsPanel() {
+    if (!settingsPanel || !snapshot) return;
+    const current =
+      snapshot.settings && Object.keys(snapshot.settings).length ? snapshot.settings : settings;
+    const sum = body.querySelector(".lobby-settings-sum");
+    if (sum && settingsPanel.summarize) {
+      try {
+        sum.textContent = settingsPanel.summarize(current);
+      } catch (err) {
+        noteRenderError("Zusammenfassung", err);
+      }
+    }
+    if (!snapshot.you?.isHost || !settingsPanel.render) return;
+    const inner = body.querySelector(".lobby-settings-body");
+    if (!inner) return;
+    inner.innerHTML = "";
+    try {
+      settingsPanel.render(inner, {
+        settings: current,
+        isHost: true,
+        onChange: onHostSettingsChange,
+      });
+    } catch (err) {
+      noteRenderError("Einstellungen", err);
+    }
+  }
+
   async function onHostSettingsChange(next) {
     if (!snapshot?.you?.isHost) return;
     snapshot = { ...snapshot, settings: next };
-    const sum = body.querySelector(".lobby-settings-sum");
-    if (sum && settingsPanel?.summarize) sum.textContent = settingsPanel.summarize(next);
+    paintSettingsPanel();
+    lastRoomFinger = roomFingerprint(snapshot);
     try {
       await updateSettings(next);
     } catch (err) {
@@ -595,7 +659,11 @@ export function mountLobby(root, options = {}) {
     if (!settingsPanel) return;
     const current = room.settings && Object.keys(room.settings).length ? room.settings : settings;
     if (settingsPanel.summarize) {
-      body.append(el("p", "lobby-settings-sum", settingsPanel.summarize(current)));
+      try {
+        body.append(el("p", "lobby-settings-sum", settingsPanel.summarize(current)));
+      } catch (err) {
+        noteRenderError("Zusammenfassung", err);
+      }
     }
     if (host && settingsPanel.render) {
       const box = el("details", "lobby-settings");
@@ -608,11 +676,15 @@ export function mountLobby(root, options = {}) {
       const inner = el("div", "lobby-settings-body");
       box.append(inner);
       body.append(box);
-      settingsPanel.render(inner, {
-        settings: current,
-        isHost: true,
-        onChange: onHostSettingsChange,
-      });
+      try {
+        settingsPanel.render(inner, {
+          settings: current,
+          isHost: true,
+          onChange: onHostSettingsChange,
+        });
+      } catch (err) {
+        noteRenderError("Einstellungen", err);
+      }
     }
   }
 
@@ -648,52 +720,60 @@ export function mountLobby(root, options = {}) {
 
     body.append(el("h2", "lobby-list-title", "Spieler"));
     const list = el("ul", "lobby-players");
-    for (const player of room.players) {
-      const item = el("li", "lobby-player");
-      const dot = el("span", `lobby-dot${player.online ? " is-on" : ""}`);
-      const label = el("span", "lobby-player-name", player.name);
-      const tags = [];
-      if (player.isSelf) tags.push("Du");
-      if (player.isHost) tags.push("Host");
-      if (player.dummy || player.spotifyStatus === "muted") tags.push("Stumm");
-      else if (player.spotifyStatus === "ready") tags.push("Spotify bereit");
-      else if (player.spotifyStatus === "sleep") tags.push("Spotify schläft – öffne kurz Spotify");
-      else if (player.spotifyName) tags.push(player.spotifyName);
-      if (!player.online) tags.push("offline");
-      const meta = el("span", "lobby-player-meta", tags.join(" · "));
-      const info = el("div", "lobby-player-info");
-      info.append(label, meta);
-      item.append(dot, info);
-      if (host && room.players.length > 1) {
-        const tools = el("div", "lobby-player-tools");
-        const up = el("button", "btn lobby-icon", "▲");
-        up.type = "button";
-        up.title = "Nach oben";
-        up.disabled = room.players[0].id === player.id;
-        up.addEventListener("click", () => move(player.id, -1));
-        const down = el("button", "btn lobby-icon", "▼");
-        down.type = "button";
-        down.title = "Nach unten";
-        down.disabled = room.players[room.players.length - 1].id === player.id;
-        down.addEventListener("click", () => move(player.id, 1));
-        tools.append(up, down);
-        if (!player.isSelf) {
-          const removeBtn = el("button", "btn lobby-icon", "×");
-          removeBtn.type = "button";
-          removeBtn.title = "Entfernen";
-          removeBtn.addEventListener("click", () => kick(player.id));
-          tools.append(removeBtn);
+    try {
+      for (const player of room.players || []) {
+        const item = el("li", "lobby-player");
+        const dot = el("span", `lobby-dot${player.online ? " is-on" : ""}`);
+        const label = el("span", "lobby-player-name", player.name);
+        const tags = [];
+        if (player.isSelf) tags.push("Du");
+        if (player.isHost) tags.push("Host");
+        if (player.dummy || player.spotifyStatus === "muted") tags.push("Stumm");
+        else if (player.spotifyStatus === "ready") tags.push("Spotify bereit");
+        else if (player.spotifyStatus === "sleep") tags.push("Spotify schläft – öffne kurz Spotify");
+        else if (player.spotifyName) tags.push(player.spotifyName);
+        if (!player.online) tags.push("offline");
+        const meta = el("span", "lobby-player-meta", tags.join(" · "));
+        const info = el("div", "lobby-player-info");
+        info.append(label, meta);
+        item.append(dot, info);
+        if (host && room.players.length > 1) {
+          const tools = el("div", "lobby-player-tools");
+          const up = el("button", "btn lobby-icon", "▲");
+          up.type = "button";
+          up.title = "Nach oben";
+          up.disabled = room.players[0].id === player.id;
+          up.addEventListener("click", () => move(player.id, -1));
+          const down = el("button", "btn lobby-icon", "▼");
+          down.type = "button";
+          down.title = "Nach unten";
+          down.disabled = room.players[room.players.length - 1].id === player.id;
+          down.addEventListener("click", () => move(player.id, 1));
+          tools.append(up, down);
+          if (!player.isSelf) {
+            const removeBtn = el("button", "btn lobby-icon", "×");
+            removeBtn.type = "button";
+            removeBtn.title = "Entfernen";
+            removeBtn.addEventListener("click", () => kick(player.id));
+            tools.append(removeBtn);
+          }
+          item.append(tools);
         }
-        item.append(tools);
+        list.append(item);
       }
-      list.append(item);
+    } catch (err) {
+      noteRenderError("Spieler", err);
     }
     body.append(list);
 
     if (options.renderRoomExtra) {
       const extra = el("div", "lobby-extra");
       body.append(extra);
-      options.renderRoomExtra(extra, { room, isHost: host });
+      try {
+        options.renderRoomExtra(extra, { room, isHost: host, refresh: () => render() });
+      } catch (err) {
+        noteRenderError("Lobby-Extra", err);
+      }
     }
 
     appendHint();
@@ -746,24 +826,28 @@ export function mountLobby(root, options = {}) {
     if (destroyed || started) return;
     const keepScroll = Boolean(snapshot && body.querySelector(".lobby-code"));
     const top = keepScroll ? body.scrollTop : 0;
-    if (typeof navigator !== "undefined" && navigator.onLine === false && !snapshot) {
-      renderOffline();
-      lastRoomFinger = "";
-      return;
-    }
-    if (snapshot) {
-      renderRoom(snapshot);
-      lastRoomFinger = roomFingerprint(snapshot);
-      body.scrollTop = top;
-      requestAnimationFrame(() => {
+    try {
+      if (typeof navigator !== "undefined" && navigator.onLine === false && !snapshot) {
+        renderOffline();
+        lastRoomFinger = "";
+        return;
+      }
+      if (snapshot) {
+        renderRoom(snapshot);
+        lastRoomFinger = roomFingerprint(snapshot);
         body.scrollTop = top;
-      });
-      return;
+        requestAnimationFrame(() => {
+          body.scrollTop = top;
+        });
+        return;
+      }
+      lastRoomFinger = "";
+      if (entryStep === "create") renderCreate();
+      else if (entryStep === "join") renderJoin();
+      else renderChoice();
+    } catch (err) {
+      noteRenderError("Lobby", err);
     }
-    lastRoomFinger = "";
-    if (entryStep === "create") renderCreate();
-    else if (entryStep === "join") renderJoin();
-    else renderChoice();
   }
 
   initOnline()
@@ -783,9 +867,14 @@ export function mountLobby(root, options = {}) {
       }
     });
 
+  ensurePressFeedback();
   render();
 
   return {
+    refresh() {
+      lastRoomFinger = "";
+      render();
+    },
     destroy() {
       destroyed = true;
       window.clearTimeout(hintTimer);

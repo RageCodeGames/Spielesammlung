@@ -149,8 +149,29 @@ function toast(message) {
 
 function reportError(context, err) {
   console.error(`[zeitsprung] ${context}`, err);
+  logDiagnose(`${context}: ${err?.message || err}`);
   toast(err?.message || "Etwas ist schiefgelaufen.");
 }
+
+let pressBound = false;
+function bindPressFeedback() {
+  if (pressBound) return;
+  pressBound = true;
+  const down = (event) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    const btn = event.target.closest?.("button, .choice, a.back");
+    if (!btn || btn.disabled) return;
+    document.querySelectorAll(".is-pressed").forEach((node) => node.classList.remove("is-pressed"));
+    btn.classList.add("is-pressed");
+  };
+  const up = () => {
+    document.querySelectorAll(".is-pressed").forEach((node) => node.classList.remove("is-pressed"));
+  };
+  document.addEventListener("pointerdown", down, true);
+  document.addEventListener("pointerup", up, true);
+  document.addEventListener("pointercancel", up, true);
+}
+bindPressFeedback();
 
 function backLink() {
   const link = el("a", "back");
@@ -304,101 +325,121 @@ function openImport() {
   });
 }
 
-function lobbyExtras(container, { room, isHost }) {
-  container.innerHTML = "";
-  if (sameSpotifyAccounts(room.players)) {
-    container.append(
-      el("p", "note is-bad", "Ein Spotify-Konto kann nur auf einem Gerät gleichzeitig abspielen")
-    );
-  }
-  const meBox = el("div", "zs-lobby-me");
-  meBox.append(el("h2", "group-label", "Dein Spotify"));
-  const muteRow = el("label", "switch-row");
-  const mute = document.createElement("input");
-  mute.type = "checkbox";
-  mute.checked = isMuted();
-  mute.addEventListener("change", async () => {
-    setMuted(mute.checked);
-    if (mute.checked) await pauseLocal();
-    await refreshPlayDevices().catch(() => {});
-    await publishStatus();
-  });
-  muteRow.append(mute, el("span", "", "Stumm (ohne Spotify-Anmeldung)"));
-  meBox.append(muteRow);
-
-  if (!isMuted()) {
-    if (!session) {
-      const loginBtn = el("button", "btn", "Mit Spotify anmelden");
-      loginBtn.type = "button";
-      loginBtn.addEventListener("click", async () => {
-        rememberView("lobby");
-        try {
-          await login();
-        } catch (err) {
-          reportError("Anmeldung", err);
-        }
-      });
-      meBox.append(loginBtn);
-    } else {
-      meBox.append(el("p", "", `Konto: ${session.displayName}`));
-      const out = el("button", "btn", "Abmelden");
-      out.type = "button";
-      out.addEventListener("click", async () => {
-        logout();
-        session = null;
-        await publishStatus();
-      });
-      meBox.append(out);
-      const box = el("div", "stack");
-      const rows = listDevices();
-      if (!rows.length) meBox.append(el("p", "note is-bad", "Dein Spotify schläft – öffne kurz Spotify"));
-      for (const device of rows) {
-        const row = el("label", "switch-row");
-        const radio = document.createElement("input");
-        radio.type = "radio";
-        radio.name = "zs-device";
-        radio.value = device.id;
-        radio.checked = device.id === localDeviceId();
-        radio.addEventListener("change", async () => {
-          if (!radio.checked) return;
-          chooseDevice(device.id);
-          await publishStatus();
-        });
-        row.append(radio, el("span", "", `${device.name}${device.active ? " (aktiv)" : ""}`));
-        box.append(row);
+function lobbyExtras(container, { room, isHost, refresh }) {
+  function paint() {
+    try {
+      container.innerHTML = "";
+      if (sameSpotifyAccounts(room.players)) {
+        container.append(
+          el("p", "note is-bad", "Ein Spotify-Konto kann nur auf einem Gerät gleichzeitig abspielen")
+        );
       }
-      meBox.append(box);
-      const refresh = el("button", "btn", "Geräte aktualisieren");
-      refresh.type = "button";
-      refresh.addEventListener("click", async () => {
-        try {
-          await refreshPlayDevices();
-          await publishStatus();
-        } catch (err) {
-          reportError("Geräte", err);
-        }
+      const meBox = el("div", "zs-lobby-me");
+      meBox.append(el("h2", "group-label", "Dein Spotify"));
+      const muteRow = el("label", "switch-row");
+      const mute = document.createElement("input");
+      mute.type = "checkbox";
+      mute.checked = isMuted();
+      mute.addEventListener("change", async () => {
+        setMuted(mute.checked);
+        paint();
+        if (isMuted()) await pauseLocal();
+        await refreshPlayDevices().catch((err) => reportError("Geräte", err));
+        await publishStatus();
+        paint();
       });
-      meBox.append(refresh);
+      muteRow.append(mute, el("span", "", "Stumm (ohne Spotify-Anmeldung)"));
+      meBox.append(muteRow);
+
+      if (!isMuted()) {
+        if (!session) {
+          const loginBtn = el("button", "btn", "Mit Spotify anmelden");
+          loginBtn.type = "button";
+          loginBtn.addEventListener("click", async () => {
+            rememberView("lobby");
+            try {
+              await login();
+            } catch (err) {
+              reportError("Anmeldung", err);
+            }
+          });
+          meBox.append(loginBtn);
+        } else {
+          meBox.append(el("p", "", `Konto: ${session.displayName}`));
+          const out = el("button", "btn", "Abmelden");
+          out.type = "button";
+          out.addEventListener("click", async () => {
+            logout();
+            session = null;
+            await publishStatus();
+            paint();
+          });
+          meBox.append(out);
+          const rows = listDevices();
+          const chosen = rows.find((row) => row.id === localDeviceId()) || rows.find((row) => row.active);
+          if (chosen) meBox.append(el("p", "note", `Spielt auf: ${chosen.name}`));
+          else meBox.append(el("p", "note is-bad", "Dein Spotify schläft – öffne kurz Spotify"));
+          const box = el("div", "stack");
+          for (const device of rows) {
+            const row = el("label", "switch-row");
+            const radio = document.createElement("input");
+            radio.type = "radio";
+            radio.name = "zs-device";
+            radio.value = device.id;
+            radio.checked = device.id === localDeviceId();
+            radio.addEventListener("change", async () => {
+              if (!radio.checked) return;
+              chooseDevice(device.id);
+              paint();
+              await publishStatus();
+            });
+            row.append(radio, el("span", "", `${device.name}${device.active ? " (aktiv)" : ""}`));
+            box.append(row);
+          }
+          if (rows.length) meBox.append(box);
+          const refreshBtn = el("button", "btn", "Geräte aktualisieren");
+          refreshBtn.type = "button";
+          refreshBtn.addEventListener("click", async () => {
+            refreshBtn.disabled = true;
+            refreshBtn.textContent = "Aktualisiere …";
+            try {
+              await refreshPlayDevices();
+              await publishStatus();
+              paint();
+            } catch (err) {
+              reportError("Geräte", err);
+              refreshBtn.disabled = false;
+              refreshBtn.textContent = "Geräte aktualisieren";
+            }
+          });
+          meBox.append(refreshBtn);
+        }
+      }
+      container.append(meBox);
+
+      if (isHost && isDev()) {
+        const add = el("button", "btn", "Testspieler hinzufügen");
+        add.type = "button";
+        add.disabled = room.players.length >= MAX_PLAYERS;
+        add.addEventListener("click", async () => {
+          add.disabled = true;
+          try {
+            const used = new Set(room.players.map((p) => p.name));
+            const name = DEV_NAMES.find((n) => !used.has(n)) || `Test ${room.players.length}`;
+            await onlineApi.addDummyPlayer(name);
+            refresh?.();
+          } catch (err) {
+            reportError("Testspieler", err);
+            add.disabled = false;
+          }
+        });
+        container.append(add);
+      }
+    } catch (err) {
+      reportError("Spotify-Bereich", err);
     }
   }
-  container.append(meBox);
-
-  if (isHost && isDev()) {
-    const add = el("button", "btn", "Testspieler hinzufügen");
-    add.type = "button";
-    add.disabled = room.players.length >= MAX_PLAYERS;
-    add.addEventListener("click", async () => {
-      add.disabled = true;
-      try {
-        const used = new Set(room.players.map((p) => p.name));
-        const name = DEV_NAMES.find((n) => !used.has(n)) || `Test ${room.players.length}`;
-        await onlineApi.addDummyPlayer(name);
-      } catch (err) {
-        reportError("Testspieler", err);
-      }
-    });
-    container.append(add);
-  }
+  paint();
   publishStatus();
 }
 
@@ -446,8 +487,10 @@ function renderSettings(container, { settings, onChange }) {
   container.append(el("h2", "group-label", "Ziel"));
   const goals = el("div", "btn-row");
   for (const n of GOAL_OPTIONS) {
-    const button = el("button", current.goal === n ? "btn primary" : "btn", `${n} Karten`);
+    const on = current.goal === n;
+    const button = el("button", on ? "btn primary" : "btn", `${n} Karten`);
     button.type = "button";
+    button.setAttribute("aria-pressed", on ? "true" : "false");
     button.addEventListener("click", () => onChange({ ...current, goal: n }));
     goals.append(button);
   }
@@ -459,8 +502,10 @@ function renderSettings(container, { settings, onChange }) {
     [30, "30 Sekunden"],
     [0, "Ganzer Song"],
   ]) {
-    const button = el("button", current.clipSec === sec ? "btn primary" : "btn", label);
+    const on = current.clipSec === sec;
+    const button = el("button", on ? "btn primary" : "btn", label);
     button.type = "button";
+    button.setAttribute("aria-pressed", on ? "true" : "false");
     button.addEventListener("click", () => onChange({ ...current, clipSec: sec }));
     clips.append(button);
   }
@@ -469,8 +514,10 @@ function renderSettings(container, { settings, onChange }) {
   container.append(el("h2", "group-label", "Start-Tokens"));
   const toks = el("div", "btn-row");
   for (const n of TOKEN_START_OPTIONS) {
-    const button = el("button", current.startTokens === n ? "btn primary" : "btn", String(n));
+    const on = current.startTokens === n;
+    const button = el("button", on ? "btn primary" : "btn", String(n));
     button.type = "button";
+    button.setAttribute("aria-pressed", on ? "true" : "false");
     button.addEventListener("click", () => onChange({ ...current, startTokens: n }));
     toks.append(button);
   }
@@ -523,6 +570,9 @@ async function enterLobby() {
         initial,
         summarize: (raw) => summarizeSettings(raw, catalogs),
         render: renderSettings,
+      },
+      onRenderError(area, err) {
+        logDiagnose(`Zeichnen (${area}): ${err?.message || err}`);
       },
       async onBeforeStart(room) {
         const settings = normalizeSettings(room.settings);
@@ -1085,6 +1135,15 @@ function showDiagnose() {
 
 function renderPlay() {
   if (!state) return;
+  try {
+    renderPlayView();
+  } catch (err) {
+    console.error("[zeitsprung] Zeichnen", err);
+    logDiagnose(`Zeichnen fehlgeschlagen: ${err?.message || err}`);
+  }
+}
+
+function renderPlayView() {
   if (state.waitingForHost) {
     app.replaceChildren(el("p", "lead", "Warte auf den Host …"));
     return;

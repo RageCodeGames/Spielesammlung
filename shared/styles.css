@@ -394,7 +394,13 @@ body.spotify-test #app:not(:has(> .screen)) {
   .tile:active,
   .back:active,
   .sound-toggle:active,
-  .update-banner button:active {
+  .update-banner button:active,
+  .btn:active,
+  .choice:active,
+  a.back:active,
+  .btn.is-pressed,
+  .choice.is-pressed,
+  a.back.is-pressed {
     transform: none;
   }
 }
@@ -421,11 +427,28 @@ body.spotify-test #app:not(:has(> .screen)) {
   color: var(--accent-ink);
 }
 
+.btn:active,
+.choice:active,
+a.back:active,
+.btn.is-pressed,
+.choice.is-pressed,
+a.back.is-pressed {
+  transform: scale(0.97);
+  filter: brightness(1.18);
+}
+
+.btn.primary:active,
+.btn.primary.is-pressed {
+  filter: brightness(0.9);
+}
+
 .btn:disabled,
-.btn:disabled:active {
+.btn:disabled:active,
+.btn:disabled.is-pressed {
   opacity: 0.35;
   cursor: default;
   transform: none;
+  filter: none;
 }
 
 .btn-row {
