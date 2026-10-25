@@ -1,4 +1,4 @@
-﻿import { mountOrientation } from "../../shared/orientation.js";
+import { mountOrientation } from "../../shared/orientation.js";
 import { MIN_PLAYERS, MAX_PLAYERS, ROUND_COUNT, tableTotalsMatch } from "./rules.js";
 import {
   ROLE_LABEL,

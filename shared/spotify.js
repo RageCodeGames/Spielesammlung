@@ -500,8 +500,15 @@ export async function playViaPlaylist(playlistInput, target, deviceId) {
   );
 }
 
+/** Playlist-Zeile: seit Feb 2026 `item`, vorher `track` – beides akzeptieren. */
+function playlistRowTrack(row) {
+  if (!row || typeof row !== "object") return null;
+  return row.item || row.track || null;
+}
+
 /**
  * Playlist-Metadaten und alle Tracks laden (paginiert).
+ * Development Mode: GET /playlists/{id}/items (nicht mehr /tracks).
  * @returns {Promise<{ id: string, title: string, tracks: Array<{ id: string, uri: string, title: string, artist: string, year: number, album: string, albumType: string }> }>}
  */
 export async function fetchPlaylistCatalog(playlistInput) {
@@ -513,17 +520,37 @@ export async function fetchPlaylistCatalog(playlistInput) {
   const tracks = [];
   let offset = 0;
   const limit = 50;
+  let missingYear = 0;
+  let skipped = 0;
+  // item = neuer Name (Feb 2026), track = Fallback für ältere Antworten
+  const fields = encodeURIComponent(
+    "items(item(id,uri,name,type,artists(name),album(name,release_date,album_type)),track(id,uri,name,type,artists(name),album(name,release_date,album_type))),next"
+  );
   for (;;) {
     const page = await api(
       "GET",
-      `/playlists/${encodeURIComponent(id)}/tracks?limit=${limit}&offset=${offset}&fields=items(track(id,uri,name,artists(name),album(name,release_date,album_type))),next`
+      `/playlists/${encodeURIComponent(id)}/items?limit=${limit}&offset=${offset}&fields=${fields}`
     );
     const items = Array.isArray(page?.items) ? page.items : [];
+    if (offset === 0 && !items.length && page && page.items == null) {
+      note("Playlist-Antwort ohne items – oft fremde Playlist (seit März 2026 nur eigene/Mitbearbeitung)");
+    }
     for (const row of items) {
-      const track = row?.track;
-      if (!track?.id || track.type === "episode") continue;
+      const track = playlistRowTrack(row);
+      if (!track?.id) {
+        skipped += 1;
+        continue;
+      }
+      if (track.type && track.type !== "track") {
+        skipped += 1;
+        continue;
+      }
       const release = String(track.album?.release_date || "");
       const year = Number((release.match(/^(\d{4})/) || [])[1]) || 0;
+      if (!release) {
+        missingYear += 1;
+        note(`Fehlendes album.release_date · track=${track.id} · „${track.name || "?"}“`);
+      }
       tracks.push({
         id: track.id,
         uri: track.uri || `spotify:track:${track.id}`,
@@ -540,6 +567,10 @@ export async function fetchPlaylistCatalog(playlistInput) {
     if (!page?.next || items.length < limit) break;
     offset += limit;
   }
+  if (missingYear) {
+    note(`${missingYear} Songs ohne album.release_date – Jahr manuell prüfen`);
+  }
+  if (skipped) note(`${skipped} Einträge übersprungen (kein Track / Episode)`);
   note(`Playlist geladen: ${title} · ${tracks.length} Songs`);
   return { id, title, tracks };
 }
@@ -608,21 +639,27 @@ async function api(method, path, body) {
   }
 
   const { reason, message } = readApiError(data);
+  const errDetail =
+    !response.ok && text
+      ? text.length <= 800
+        ? text
+        : `${text.slice(0, 800)}…`
+      : "";
   pushDiagnose({
     method,
     path,
     status: response.status,
-    reason: response.ok ? "" : reason,
+    reason: response.ok ? "" : reason || (response.status === 403 ? "Forbidden" : ""),
     message: response.ok
       ? response.status === 204 || response.status === 202
         ? "OK (kein Inhalt)"
         : "OK"
-      : message || `Fehler ${response.status}`,
-    detail: !response.ok && text && text.length < 400 ? text : "",
+      : message || (response.status === 403 ? "Forbidden (403)" : `Fehler ${response.status}`),
+    detail: errDetail,
   });
 
   if (response.status === 204 || response.status === 202) return null;
-  if (!response.ok) throw fromApiError(response.status, data, path);
+  if (!response.ok) throw fromApiError(response.status, data, path, text);
   return data;
 }
 
@@ -737,7 +774,7 @@ async function fetchMe(accessToken) {
     reason: response.ok ? "" : failure.reason,
     message: response.ok ? "Profil OK" : failure.message || `HTTP ${response.status}`,
   });
-  if (!response.ok) throw fromApiError(response.status, data, "/me");
+  if (!response.ok) throw fromApiError(response.status, data, "/me", JSON.stringify(data));
   return data;
 }
 
@@ -787,10 +824,11 @@ function readApiError(data) {
   };
 }
 
-function fromApiError(status, data, path = "") {
+function fromApiError(status, data, path = "", rawText = "") {
   const { reason, message } = readApiError(data);
   const blob = `${reason} ${message}`.toLowerCase();
-  const extras = { reason, detail: message, path };
+  const detail = message || (typeof rawText === "string" ? rawText.slice(0, 400) : "");
+  const extras = { reason: reason || (status === 403 ? "Forbidden" : ""), detail, path };
 
   if (status === 401) {
     return new SpotifyError("auth-expired", "Anmeldung abgelaufen. Bitte erneut mit Spotify anmelden.", status, extras);
@@ -822,8 +860,23 @@ function fromApiError(status, data, path = "") {
       extras
     );
   }
+  if (status === 403 && /\/playlists\/[^/]+\/(items|tracks)/.test(path)) {
+    return new SpotifyError(
+      "playlist-forbidden",
+      "Playlist-Inhalt gesperrt (403 Forbidden). Seit März 2026 nur eigene Playlists oder solche, an denen du mitarbeitest. Fremde Playlists liefern keinen Inhalt mehr.",
+      status,
+      extras
+    );
+  }
   if (status === 403) {
-    return new SpotifyError("forbidden", message || "Spotify hat den Befehl abgelehnt.", status, extras);
+    return new SpotifyError(
+      "forbidden",
+      detail
+        ? `Spotify hat abgelehnt (403 Forbidden): ${detail}`
+        : "Spotify hat den Befehl abgelehnt (403 Forbidden). Details stehen in der Diagnose.",
+      status,
+      extras
+    );
   }
   return new SpotifyError("api", message || `Spotify-Fehler (${status}).`, status, extras);
 }

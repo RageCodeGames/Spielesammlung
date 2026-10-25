@@ -1,4 +1,4 @@
-﻿import { mountOrientation } from "../../shared/orientation.js";
+import { mountOrientation } from "../../shared/orientation.js";
 import {
   COLORS,
   MAX_PLAYERS,

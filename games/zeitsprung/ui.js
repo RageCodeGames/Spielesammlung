@@ -196,7 +196,7 @@ function paint() {
     el(
       "p",
       "note",
-      "Neu: Playlist-Rechte. Einmal abmelden und erneut mit Spotify anmelden, falls das Laden scheitert."
+      "Die Playlist muss dir gehören oder du musst Mitbearbeiter sein (Spotify seit März 2026). Bei Fehlern: abmelden und neu anmelden (Playlist-Rechte)."
     )
   );
 
