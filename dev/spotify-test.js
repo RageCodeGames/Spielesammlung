@@ -1,6 +1,7 @@
 import { mountLobby } from "../shared/lobby.js";
 import { isMuted, mountMuteButton } from "../shared/mute-button.js";
 import {
+  getRoomCode,
   isHost,
   leaveRoom,
   mountConnectionBadge,
@@ -8,6 +9,7 @@ import {
   onRoomChange,
   sendAction,
   setState,
+  updateSelfPlayer,
 } from "../shared/online.js";
 import {
   clearDiagnoseLog,
@@ -36,6 +38,9 @@ import {
 const app = document.getElementById("app");
 const NO_DEVICE_HINT =
   "Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren.";
+const PICK_DEVICE_HINT = "Bitte Gerät auswählen";
+const SAME_ACCOUNT_HINT =
+  "Ein Spotify-Konto kann nur auf einem Gerät gleichzeitig abspielen";
 const END_MARGIN_MS = 2000;
 
 let session = getStoredSession();
@@ -136,6 +141,61 @@ function paintPlaylistPreview() {
   showNote(node, uri ? `Wird gesendet als: ${uri}` : error, !uri);
 }
 
+function selectedDevice() {
+  const id = selectedDeviceId();
+  return devices.find((row) => row.id === id) || null;
+}
+
+function paintSelectedDevice() {
+  const node = app.querySelector("[data-plays-on]");
+  if (!node) return;
+  const device = selectedDevice();
+  if (device) {
+    node.hidden = false;
+    node.className = "note spotify-plays-on";
+    node.textContent = `Spielt auf: ${device.name}`;
+    return;
+  }
+  if (devices.length) {
+    node.hidden = false;
+    node.className = "note is-bad spotify-plays-on";
+    node.textContent = PICK_DEVICE_HINT;
+    return;
+  }
+  node.hidden = true;
+  node.textContent = "";
+}
+
+/** Gerät wählen: gespeichert / aktiv / bei genau einem Gerät automatisch. */
+function pickDeviceId(list = devices) {
+  if (list.length === 1) return list[0].id;
+  const preferred = getPreferredDeviceId();
+  if (preferred && list.some((row) => row.id === preferred)) return preferred;
+  if (deviceId && list.some((row) => row.id === deviceId)) return deviceId;
+  return list.find((row) => row.active)?.id || list[0]?.id || "";
+}
+
+/**
+ * Für Abspielen: falls nötig Geräte neu laden.
+ * Bei genau einem Gerät automatisch nehmen, sonst „Bitte Gerät auswählen“.
+ */
+async function ensurePlayDevice({ reloadIfMissing = true } = {}) {
+  const hint = app.querySelector("[data-local-hint]");
+  let id = selectedDeviceId();
+  if (id && devices.some((row) => row.id === id)) return id;
+  if (!reloadIfMissing) {
+    showNote(hint, devices.length ? PICK_DEVICE_HINT : NO_DEVICE_HINT, true);
+    paintSelectedDevice();
+    return "";
+  }
+  await refreshDevices();
+  id = selectedDeviceId();
+  if (id && devices.some((row) => row.id === id)) return id;
+  showNote(hint, devices.length ? PICK_DEVICE_HINT : NO_DEVICE_HINT, true);
+  paintSelectedDevice();
+  return "";
+}
+
 /** Gemeinsamer Start: Lag, Hinweis, Countdown – für play / Warteschlange / Playlist. */
 async function startHere(runner, clip, sentAt) {
   muted = isMuted();
@@ -147,9 +207,8 @@ async function startHere(runner, clip, sentAt) {
     showNote(hint, "Dieses Gerät ist stumm.");
     return;
   }
-  const id = selectedDeviceId();
+  const id = await ensurePlayDevice({ reloadIfMissing: true });
   if (!id) {
-    showNote(hint, NO_DEVICE_HINT, true);
     if (lagNode) lagNode.textContent = "";
     return;
   }
@@ -166,6 +225,37 @@ async function startHere(runner, clip, sentAt) {
   } catch (err) {
     if (lagNode) lagNode.textContent = "";
     showError(hint, err, "Abspielen");
+  }
+}
+
+function sameSpotifyAccounts(players) {
+  const counts = new Map();
+  for (const player of players || []) {
+    const key = player.spotifyUserId || "";
+    if (!key) continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.values()].some((n) => n > 1);
+}
+
+function paintSameAccountWarning(node, players) {
+  if (!node) return;
+  if (sameSpotifyAccounts(players)) {
+    showNote(node, SAME_ACCOUNT_HINT, true);
+  } else {
+    showNote(node, "");
+  }
+}
+
+async function publishSpotifyToRoom() {
+  if (!getRoomCode() || !session) return;
+  try {
+    await updateSelfPlayer({
+      spotifyName: session.displayName || "",
+      spotifyUserId: session.userId || "",
+    });
+  } catch (err) {
+    console.error("[spotify-test] Spotify-Name teilen", err);
   }
 }
 
@@ -288,21 +378,18 @@ async function refreshDevices() {
   if (!session) return;
   try {
     devices = await getDevices();
-    const preferred = getPreferredDeviceId();
-    if (preferred && devices.some((row) => row.id === preferred)) {
-      deviceId = preferred;
-    } else if (deviceId && devices.some((row) => row.id === deviceId)) {
-      /* aktuelle Auswahl behalten */
-    } else {
-      deviceId = devices.find((row) => row.active)?.id || devices[0]?.id || "";
-    }
+    deviceId = pickDeviceId(devices);
     if (deviceId) setPreferredDeviceId(deviceId);
     paintDevices(box);
+    paintSelectedDevice();
     if (!devices.length) showNote(hint, NO_DEVICE_HINT, true);
+    else if (!deviceId) showNote(hint, PICK_DEVICE_HINT, true);
     else showNote(hint, "");
   } catch (err) {
     devices = [];
+    deviceId = "";
     paintDevices(box);
+    paintSelectedDevice();
     showError(hint, err, "Geräte");
   }
 }
@@ -312,6 +399,7 @@ function paintDevices(box) {
   box.innerHTML = "";
   if (!devices.length) {
     box.append(el("p", "lead", "Keine Geräte."));
+    paintSelectedDevice();
     return;
   }
   for (const device of devices) {
@@ -325,6 +413,9 @@ function paintDevices(box) {
       if (!radio.checked) return;
       deviceId = device.id;
       setPreferredDeviceId(device.id);
+      paintSelectedDevice();
+      const hint = app.querySelector("[data-device-hint]");
+      showNote(hint, "");
     });
     const meta = [device.type, device.active ? "aktiv" : "", device.restricted ? "eingeschränkt" : ""]
       .filter(Boolean)
@@ -332,6 +423,7 @@ function paintDevices(box) {
     row.append(radio, el("span", "", `${device.name}${meta ? ` (${meta})` : ""}`));
     box.append(row);
   }
+  paintSelectedDevice();
 }
 
 function handleCue(cue) {
@@ -396,6 +488,13 @@ function showLobby() {
     title: "Mehrere Handys",
     lead: "Raum erstellen, auf dem zweiten Handy beitreten, dann starten.",
     minPlayers: 1,
+    renderRoomExtra(container, { room: next }) {
+      container.innerHTML = "";
+      const warn = el("p", "note is-bad");
+      paintSameAccountWarning(warn, next?.players);
+      if (!warn.hidden) container.append(warn);
+      publishSpotifyToRoom();
+    },
     async onBeforeStart() {
       lastCueSeq = 0;
       await setState({});
@@ -432,7 +531,9 @@ function showRoomPlay(initial) {
   panel.append(el("h2", "", "Gemeinsam abspielen"));
   const status = el("p", "lead");
   const list = el("ul", "lobby-players");
-  panel.append(status, list);
+  const accountWarn = el("p", "note is-bad");
+  accountWarn.hidden = true;
+  panel.append(status, list, accountWarn);
   panel.append(
     el(
       "p",
@@ -440,6 +541,7 @@ function showRoomPlay(initial) {
       "Der Host schickt Playlist-ID plus Song-ID (oder Position). Jedes Handy startet den Song auf seinem eigenen Spotify-Gerät."
     )
   );
+  publishSpotifyToRoom();
 
   const actions = el("div", "btn-row");
   if (isHost()) {
@@ -487,11 +589,13 @@ function showRoomPlay(initial) {
       const tags = [];
       if (player.isSelf) tags.push("Du");
       if (player.isHost) tags.push("Host");
+      if (player.spotifyName) tags.push(player.spotifyName);
       if (!player.online) tags.push("offline");
       info.append(el("span", "lobby-player-meta", tags.join(" · ")));
       item.append(dot, info);
       list.append(item);
     }
+    paintSameAccountWarning(accountWarn, next.players);
     if (next.state?.cue) handleCue(next.state.cue);
   }
 
@@ -572,7 +676,7 @@ function render() {
     });
     dock.append(loginBtn);
   } else {
-    body.append(el("p", "", `Angemeldet: ${session.displayName}`));
+    body.append(el("p", "spotify-account", `Spotify-Konto: ${session.displayName}`));
     const out = el("button", "btn", "Abmelden");
     out.type = "button";
     out.addEventListener("click", () => {
@@ -591,7 +695,10 @@ function render() {
     deviceHint.hidden = true;
     const deviceBox = el("div", "stack");
     deviceBox.setAttribute("data-devices", "1");
-    body.append(deviceHint, deviceBox);
+    const playsOn = el("p", "note spotify-plays-on");
+    playsOn.setAttribute("data-plays-on", "1");
+    playsOn.hidden = true;
+    body.append(deviceHint, playsOn, deviceBox);
     const refresh = el("button", "btn primary", "Geräte aktualisieren");
     refresh.type = "button";
     refresh.addEventListener("click", () => refreshDevices());

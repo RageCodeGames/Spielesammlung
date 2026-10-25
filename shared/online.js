@@ -217,6 +217,8 @@ function mapRoom(code, data) {
       isHost: id === data.meta.hostId,
       isSelf: id === uid,
       dummy: player?.dummy === true || String(id).startsWith("sim-"),
+      spotifyName: typeof player?.spotifyName === "string" ? player.spotifyName : "",
+      spotifyUserId: typeof player?.spotifyUserId === "string" ? player.spotifyUserId : "",
     }))
     .sort((a, b) => a.seat - b.seat || a.joinedAt - b.joinedAt);
   return {
@@ -966,6 +968,20 @@ export async function kickPlayer(playerId) {
       /* noch keine Geheimnisse */
     }
   } catch (err) {
+    rethrow(err);
+  }
+}
+
+/** Eigenes Spieler-Feld aktualisieren (z. B. Spotify-Anzeigename). */
+export async function updateSelfPlayer(fields) {
+  if (!roomCode || !uid) return;
+  if (!fields || typeof fields !== "object") return;
+  try {
+    await initOnline();
+    const { ref, update } = fb.dbMod;
+    await update(ref(db, `rooms/${roomCode}/players/${uid}`), jsonSafe(fields));
+  } catch (err) {
+    console.error("[online] updateSelfPlayer", err);
     rethrow(err);
   }
 }

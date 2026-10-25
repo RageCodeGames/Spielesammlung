@@ -645,6 +645,7 @@ export function mountLobby(root, options = {}) {
       const tags = [];
       if (player.isSelf) tags.push("Du");
       if (player.isHost) tags.push("Host");
+      if (player.spotifyName) tags.push(player.spotifyName);
       if (!player.online) tags.push("offline");
       const meta = el("span", "lobby-player-meta", tags.join(" · "));
       const info = el("div", "lobby-player-info");

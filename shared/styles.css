@@ -778,6 +778,15 @@ body.spotify-test .spotify-uri {
   overflow-wrap: anywhere;
 }
 
+body.spotify-test .spotify-account {
+  font-weight: 600;
+}
+
+body.spotify-test .spotify-plays-on {
+  font-weight: 700;
+  font-size: 1.05rem;
+}
+
 body.spotify-test .switch-row {
   display: flex;
   align-items: center;
