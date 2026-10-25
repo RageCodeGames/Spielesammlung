@@ -48,6 +48,12 @@
           ".read": "auth != null && (auth.uid === $uid || root.child('rooms/' + $code + '/meta/hostId').val() === auth.uid)"
         }
       }
+    },
+    "songlists": {
+      "$playlistId": {
+        ".read": "auth != null",
+        ".write": "auth != null && $playlistId.matches(/^[A-Za-z0-9]{22}$/) && newData.hasChildren(['playlistId', 'title', 'updatedAt', 'songs']) && newData.child('playlistId').val() === $playlistId && newData.child('updatedAt').isNumber()"
+      }
     }
   }
 }

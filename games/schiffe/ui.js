@@ -1,3 +1,4 @@
+﻿import { mountOrientation } from "../../shared/orientation.js";
 import {
   SHAPES,
   allPlaced,
@@ -58,6 +59,8 @@ import { get, set } from "../../shared/storage.js";
 import { preserveScreenScroll } from "../../shared/scroll.js";
 import { requestWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
+
+mountOrientation("portrait");
 
 const STORAGE_KEY = "kajuete:schiffe";
 const BOT_KEY = "kajuete:schiffe-bot";

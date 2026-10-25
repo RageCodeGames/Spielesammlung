@@ -1,6 +1,9 @@
 import { APP_NAME, APP_TAGLINE, games } from "./games.js";
+import { mountOrientation } from "./orientation.js";
 import { isSoundEnabled, playTone, setSoundEnabled, unlock } from "./sound.js";
 import { initUpdates } from "./update.js";
+
+mountOrientation("portrait");
 
 function renderSoundButton(button) {
   const on = isSoundEnabled();

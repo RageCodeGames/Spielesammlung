@@ -1,3 +1,4 @@
+﻿import { mountOrientation } from "../../shared/orientation.js";
 import { MIN_PLAYERS, MAX_PLAYERS, ROUND_COUNT, tableTotalsMatch } from "./rules.js";
 import {
   ROLE_LABEL,
@@ -25,6 +26,8 @@ import { playTone, unlock } from "../../shared/sound.js";
 import { preserveScreenScroll } from "../../shared/scroll.js";
 import { requestWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
+
+mountOrientation("portrait");
 
 const GAME_ID = "tempel";
 const DEV_NAMES = ["Nia", "Rolo", "Mira", "Timo", "Suri", "Kale", "Pim", "Vela"];

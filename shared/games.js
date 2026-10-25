@@ -48,4 +48,12 @@ export const games = [
     href: "./games/malen/index.html",
     available: false,
   },
+  {
+    id: "zeitsprung",
+    name: "Zeitsprung",
+    description: "Songlisten aus Spotify vorbereiten (Spiel folgt).",
+    emoji: "⏪",
+    href: "./games/zeitsprung/index.html",
+    available: true,
+  },
 ];

@@ -314,6 +314,13 @@ export function initOnline() {
   return initPromise;
 }
 
+/** Firebase-DB nach Init (für Songlisten u. a. außerhalb von Räumen). */
+export async function openDatabase() {
+  await initOnline();
+  if (!db || !fb?.dbMod) fail("offline", OFFLINE_MESSAGE);
+  return { db, uid, ref: fb.dbMod.ref, get: fb.dbMod.get, set: fb.dbMod.set, update: fb.dbMod.update };
+}
+
 export async function restoreSession() {
   const session = getSession();
   if (!session?.code) return false;

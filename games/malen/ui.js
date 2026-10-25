@@ -1,3 +1,4 @@
+﻿import { mountOrientation } from "../../shared/orientation.js";
 import {
   COLORS,
   MAX_PLAYERS,
@@ -30,6 +31,8 @@ import {
 import { preserveScreenScroll } from "../../shared/scroll.js";
 import { requestWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
+
+mountOrientation("portrait");
 
 const GAME_ID = "malen";
 const DEV_NAMES = ["Nia", "Rolo", "Mira", "Timo", "Suri", "Kale", "Pim", "Vela"];

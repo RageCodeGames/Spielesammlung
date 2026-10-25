@@ -1,5 +1,8 @@
 import { mountLobby } from "../shared/lobby.js";
 import { isMuted, mountMuteButton } from "../shared/mute-button.js";
+import { mountOrientation } from "../shared/orientation.js";
+
+mountOrientation("portrait");
 import {
   getRoomCode,
   isHost,
@@ -26,14 +29,10 @@ import {
   parsePlaylistInput,
   parseTrackInput,
   pause,
-  play,
   playViaPlaylist,
-  playViaQueue,
   logDiagnose,
   redirectUri,
-  resume,
   setPreferredDeviceId,
-  TEST_TRACK_URI,
 } from "../shared/spotify.js";
 import { get, set } from "../shared/storage.js";
 
@@ -99,11 +98,6 @@ function selectedDeviceId() {
   return deviceId || devices.find((row) => row.active)?.id || devices[0]?.id || "";
 }
 
-function trackFromInput() {
-  const input = app.querySelector("[name=track]");
-  return parseTrackInput(input?.value || "");
-}
-
 function paintTrackPreview() {
   const node = app.querySelector("[data-track-preview]");
   const input = app.querySelector("[name=track]");
@@ -114,26 +108,6 @@ function paintTrackPreview() {
   }
   const { uri, error } = parseTrackInput(input.value);
   showNote(node, uri ? `Wird gesendet als: ${uri}` : error, !uri);
-}
-
-async function resumeHere() {
-  const hint = app.querySelector("[data-local-hint]");
-  const id = selectedDeviceId();
-  if (!id) {
-    showNote(hint, NO_DEVICE_HINT, true);
-    return;
-  }
-  stopCountdown();
-  try {
-    const state = await resume(id);
-    showNote(
-      hint,
-      state?.isPlaying ? "Fortsetzen klappt – das Handy spielt." : "Fortsetzen angenommen, aber es läuft nichts.",
-      !state?.isPlaying
-    );
-  } catch (err) {
-    showError(hint, err, "Fortsetzen");
-  }
 }
 
 function paintPlaylistPreview() {
@@ -523,14 +497,6 @@ async function keepAwakeStart() {
   if (ok) showNote(hint, "Wach halten: Stille läuft.");
 }
 
-async function playHere(trackUri, startMs, clip, sentAt) {
-  await startHere((id) => play(trackUri, id, startMs), clip, sentAt);
-}
-
-async function playQueueHere(trackUri, clip, sentAt) {
-  await startHere((id) => playViaQueue(trackUri, id), clip, sentAt);
-}
-
 async function playPlaylistHere(playlistInput, target, clip, sentAt) {
   await startHere((id) => playViaPlaylist(playlistInput, target, id), clip, sentAt);
 }
@@ -687,11 +653,11 @@ async function applyCue(raw, source) {
     return;
   }
 
-  if (cue.playlistUri) {
-    await playPlaylistHere(cue.playlistUri, cueTarget(cue), cue.clipSec, cue.sentAt);
-  } else {
-    await playHere(cue.trackUri, 0, cue.clipSec, cue.sentAt);
+  if (!cue.playlistUri) {
+    logDiagnose("Befehl ignoriert: Playlist-URI fehlt (nur Playlist-Weg)");
+    return;
   }
+  await playPlaylistHere(cue.playlistUri, cueTarget(cue), cue.clipSec, cue.sentAt);
 }
 
 async function playAll() {
@@ -734,16 +700,19 @@ async function playAll() {
 }
 
 function appendDiagnose(parent) {
-  parent.append(el("h2", "lobby-list-title", "Diagnose"));
+  const details = el("details", "spotify-diagnose-box");
+  const summary = el("summary", "", "Diagnose");
+  details.append(summary);
   const tools = el("div", "btn-row");
   const clear = el("button", "btn", "Diagnose leeren");
   clear.type = "button";
   clear.addEventListener("click", () => clearDiagnoseLog());
   tools.append(clear);
-  parent.append(tools);
+  details.append(tools);
   const pre = el("pre", "play-log spotify-diagnose");
   pre.setAttribute("data-diagnose", "1");
-  parent.append(pre);
+  details.append(pre);
+  parent.append(details);
 }
 
 function showLobby() {
@@ -1135,47 +1104,27 @@ function render() {
     });
     dock.append(playBtn);
 
-    /** Testknopf, der einen Start-Weg mit den aktuellen Feldern ausführt. */
-    const testButton = (label, run) => {
+    body.append(el("h2", "lobby-list-title", "Playlist-Start"));
+    const tests = el("div", "btn-row");
+    const mk = (label, mode) => {
       const button = el("button", "btn", label);
       button.type = "button";
       button.addEventListener("click", async () => {
+        const target = playlistTargetFromInputs({ forceMode: mode });
+        if (target.error) {
+          showNote(hint, target.error, true);
+          return;
+        }
         button.disabled = true;
         try {
-          await run();
+          await playPlaylistHere(target.playlistUri, cueTarget(target), clipSec, Date.now());
         } finally {
           button.disabled = false;
         }
       });
       return button;
     };
-    const withTrack = (run) => async () => {
-      const { uri, error } = trackFromInput();
-      if (!uri) {
-        showNote(hint, error, true);
-        return;
-      }
-      await run(uri);
-    };
-    const withPlaylist = (mode) => async () => {
-      const target = playlistTargetFromInputs({ forceMode: mode });
-      if (target.error) {
-        showNote(hint, target.error, true);
-        return;
-      }
-      await playPlaylistHere(target.playlistUri, cueTarget(target), clipSec, Date.now());
-    };
-
-    body.append(el("h2", "lobby-list-title", "Tests"));
-    const tests = el("div", "btn-row");
-    tests.append(
-      testButton("Über Playlist (Position)", withPlaylist("position")),
-      testButton("Über Playlist (Song-ID)", withPlaylist("track")),
-      testButton("Fortsetzen (ohne Track)", resumeHere),
-      testButton("Direkt (uris)", withTrack((uri) => playHere(uri, 0, clipSec, Date.now()))),
-      testButton("Über Warteschlange", withTrack((uri) => playQueueHere(uri, clipSec, Date.now()))),
-      testButton("Test-Track (uris)", () => playHere(TEST_TRACK_URI, 0, clipSec, Date.now()))
-    );
+    tests.append(mk("Über Playlist (Song-ID)", "track"), mk("Über Playlist (Position)", "position"));
     body.append(tests);
   }
 

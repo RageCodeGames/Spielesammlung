@@ -1,3 +1,4 @@
+import { mountOrientation } from "../../shared/orientation.js";
 import { CATEGORIES } from "./categories.js";
 import {
   ABC,
@@ -43,6 +44,8 @@ import { preserveScreenScroll } from "../../shared/scroll.js";
 import { requestWakeLock } from "../../shared/wakelock.js";
 import { initUpdates } from "../../shared/update.js";
 import { layoutLetterRing } from "./ring.js";
+
+mountOrientation("portrait");
 
 const GAME_KEY = "kajuete:tapper";
 const SETTINGS_KEY = "kajuete:tapper-settings";
@@ -979,8 +982,9 @@ function setRingLock(on) {
   document.documentElement.classList.toggle("tapper-ring", on);
   document.body.classList.toggle("tapper-ring", on);
   try {
-    if (on) screen.orientation?.lock?.("portrait");
-    else screen.orientation?.unlock?.();
+    // Ring und Tapper bleiben Hochformat – nicht freigeben, sonst dreht sich der Ring.
+    const lock = screen.orientation?.lock?.("portrait");
+    if (lock && typeof lock.catch === "function") lock.catch(() => {});
   } catch {
     /* Lock nur in installierter App / Fullscreen */
   }

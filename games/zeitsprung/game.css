@@ -1,0 +1,72 @@
+body.zeitsprung .zs-page .screen-body {
+  gap: 0.75rem;
+}
+
+body.zeitsprung .zs-filters {
+  display: grid;
+  gap: 0.65rem;
+}
+
+body.zeitsprung .zs-song-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+body.zeitsprung .zs-song {
+  padding: 0.75rem 0;
+  border-top: 1px solid rgba(244, 239, 230, 0.12);
+}
+
+body.zeitsprung .zs-song.is-suspect {
+  border-left: 3px solid var(--accent);
+  padding-left: 0.65rem;
+}
+
+body.zeitsprung .zs-song.is-excluded {
+  opacity: 0.55;
+}
+
+body.zeitsprung .zs-song-top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  align-items: baseline;
+}
+
+body.zeitsprung .zs-song-title {
+  font-size: 1.05rem;
+}
+
+body.zeitsprung .zs-song-artist {
+  opacity: 0.85;
+}
+
+body.zeitsprung .zs-song-album {
+  margin: 0.25rem 0 0;
+  font-size: 0.9rem;
+  opacity: 0.75;
+}
+
+body.zeitsprung .zs-suspect-flag {
+  margin: 0.35rem 0 0;
+}
+
+body.zeitsprung .zs-song-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: end;
+  margin-top: 0.55rem;
+}
+
+body.zeitsprung .zs-year-field {
+  max-width: 9rem;
+  margin: 0;
+}
+
+body.zeitsprung .zs-year-meta {
+  display: block;
+  font-size: 0.8rem;
+  opacity: 0.7;
+  margin-top: 0.2rem;
+}

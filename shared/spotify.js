@@ -9,19 +9,16 @@ import { get, set } from "./storage.js";
 const AUTH_URL = "https://accounts.spotify.com/authorize";
 const TOKEN_URL = "https://accounts.spotify.com/api/token";
 const API_URL = "https://api.spotify.com/v1";
-const SCOPES = "user-read-playback-state user-modify-playback-state";
+const SCOPES =
+  "user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative";
 const TOKEN_KEY = "kajuete:spotify-tokens";
 const PKCE_KEY = "kajuete:spotify-pkce";
 const DEVICE_KEY = "kajuete:spotify-device";
 const REFRESH_MARGIN_MS = 60_000;
 const TRANSFER_WAIT_MS = 1000;
-const QUEUE_WAIT_MS = 800;
 const VERIFY_WAIT_MS = 1500;
 const DIAGNOSE_MAX = 60;
 const TRACK_ID_PATTERN = /^[A-Za-z0-9]{22}$/;
-
-/** Fester, bekannter Song für den Technik-Test. */
-export const TEST_TRACK_URI = "spotify:track:4cOdK2wGLETKBW3PvgPWqT";
 
 export class SpotifyError extends Error {
   constructor(code, message, status = 0, extras = {}) {
@@ -346,28 +343,6 @@ export async function checkPlayback(label = "Stand") {
   return state;
 }
 
-/** PUT /me/player/play ohne Body – nur Fortsetzen, danach Stand prüfen. */
-export async function resume(deviceId) {
-  if (!deviceId) throw new SpotifyError("no-device", "Kein Gerät gewählt.");
-  const path = `/me/player/play?device_id=${encodeURIComponent(deviceId)}`;
-  note(`Fortsetzen: PUT ${path} · ohne Body`);
-  try {
-    await api("PUT", path);
-  } catch (err) {
-    if (err?.code === "restriction" || err?.reason === "RESTRICTION_VIOLATED") {
-      throw new SpotifyError(
-        "restriction",
-        "Restriction violated – vermutlich läuft schon etwas. In der Spotify-App prüfen oder kurz pausieren und nochmal versuchen.",
-        err.status || 403,
-        { reason: err.reason || "RESTRICTION_VIOLATED", path, detail: err.detail || "" }
-      );
-    }
-    throw err;
-  }
-  await sleep(VERIFY_WAIT_MS);
-  return checkPlayback("Prüfung Fortsetzen");
-}
-
 /** Gerät vorbereiten: aktiv → nichts, sonst Transfer mit play: true. */
 async function ensureDeviceReady(deviceId) {
   if (!deviceId) {
@@ -405,77 +380,6 @@ function note(message, extras = {}) {
 /** Freie Diagnose-Zeile (z. B. empfangene Online-Befehle). */
 export function logDiagnose(message, extras = {}) {
   note(message, extras);
-}
-
-/**
- * Song starten:
- * 1. Gerät schon aktiv → direkt play, sonst Transfer mit play: true, 1 s warten, dann play.
- * 2. Nach 1,5 s prüfen, ob der richtige Track läuft; sonst play einmal wiederholen.
- */
-export async function play(trackUri, deviceId, startMs = 0) {
-  const parsed = parseTrackInput(trackUri);
-  if (!parsed.uri) throw new SpotifyError("bad-track", parsed.error);
-  const uri = parsed.uri;
-  const position = Math.max(0, Math.floor(Number(startMs) || 0));
-  const body = { uris: [uri], position_ms: position };
-  const playPath = `/me/player/play?device_id=${encodeURIComponent(deviceId)}`;
-
-  await ensureDeviceReady(deviceId);
-  const sent = `Sende: PUT ${playPath} · URI=${uri} · Body=${JSON.stringify(body)}`;
-  note(sent);
-  await api("PUT", playPath, body);
-  const acceptedAt = Date.now();
-
-  await sleep(VERIFY_WAIT_MS);
-  const first = await verifyPlaying(uri, deviceId, "Prüfung 1");
-  if (first) return { acceptedAt, retried: false, state: first };
-
-  note("Falscher Track oder gestoppt – Play einmal wiederholen");
-  note(sent);
-  await api("PUT", playPath, body);
-  const retryAt = Date.now();
-  await sleep(VERIFY_WAIT_MS);
-  const second = await verifyPlaying(uri, deviceId, "Prüfung 2");
-  if (second) return { acceptedAt: retryAt, retried: true, state: second };
-
-  throw new SpotifyError(
-    "not-playing",
-    "Spotify hat den Befehl angenommen, aber der Song läuft nicht. Spotify-App öffnen und nochmal versuchen.",
-    0,
-    { reason: "NOT_PLAYING" }
-  );
-}
-
-/**
- * Alternative: Track in die Warteschlange legen und mit „Nächster Titel“ springen.
- * Hilft, wenn PUT play mit uris das Gerät leer lässt.
- */
-export async function playViaQueue(trackUri, deviceId) {
-  const parsed = parseTrackInput(trackUri);
-  if (!parsed.uri) throw new SpotifyError("bad-track", parsed.error);
-  const uri = parsed.uri;
-  await ensureDeviceReady(deviceId);
-
-  const queuePath = `/me/player/queue?uri=${encodeURIComponent(uri)}&device_id=${encodeURIComponent(deviceId)}`;
-  note(`Sende: POST ${queuePath} · kein Body · URI=${uri}`);
-  await api("POST", queuePath);
-  await sleep(QUEUE_WAIT_MS);
-
-  const nextPath = `/me/player/next?device_id=${encodeURIComponent(deviceId)}`;
-  note(`Sende: POST ${nextPath} · kein Body`);
-  await api("POST", nextPath);
-  const acceptedAt = Date.now();
-
-  await sleep(VERIFY_WAIT_MS);
-  const state = await verifyPlaying(uri, deviceId, "Prüfung Warteschlange");
-  if (state) return { acceptedAt, retried: false, state };
-
-  throw new SpotifyError(
-    "not-playing",
-    "Warteschlange/Next angenommen, aber der Song läuft nicht. Spotify-App öffnen und nochmal versuchen.",
-    0,
-    { reason: "NOT_PLAYING" }
-  );
 }
 
 const PLAYLIST_PUBLIC_HINT = "Playlist in Spotify auf öffentlich stellen";
@@ -543,10 +447,18 @@ export async function playViaPlaylist(playlistInput, target, deviceId) {
   }
   const acceptedAt = Date.now();
 
+  const sent = `Sende: PUT ${playPath} · Body=${JSON.stringify(body)}`;
   await sleep(VERIFY_WAIT_MS);
   if (trackUri) {
-    const state = await verifyPlaying(trackUri, deviceId, "Prüfung Playlist (Song-ID)");
-    if (state) return { acceptedAt, retried: false, state };
+    const first = await verifyPlaying(trackUri, deviceId, "Prüfung Playlist 1");
+    if (first) return { acceptedAt, retried: false, state: first };
+    note("Falscher Track oder gestoppt – Play einmal wiederholen");
+    note(sent);
+    await api("PUT", playPath, body);
+    const retryAt = Date.now();
+    await sleep(VERIFY_WAIT_MS);
+    const second = await verifyPlaying(trackUri, deviceId, "Prüfung Playlist 2");
+    if (second) return { acceptedAt: retryAt, retried: true, state: second };
     throw new SpotifyError(
       "not-playing",
       `Playlist-Play angenommen, aber genau dieser Song läuft nicht. Ist er in der Playlist? Sonst: ${PLAYLIST_PUBLIC_HINT}.`,
@@ -555,7 +467,7 @@ export async function playViaPlaylist(playlistInput, target, deviceId) {
     );
   }
 
-  const state = await checkPlayback("Prüfung Playlist");
+  const state = await checkPlayback("Prüfung Playlist 1");
   const ok = Boolean(state?.isPlaying && state.uri);
   note(
     `Prüfung Playlist: ${ok ? "läuft ✓" : "läuft nicht"} (item.uri: ${state?.uri ? "ja" : "leer"}, spielt: ${
@@ -565,12 +477,71 @@ export async function playViaPlaylist(playlistInput, target, deviceId) {
   );
   if (ok) return { acceptedAt, retried: false, state };
 
+  note("Nichts läuft – Play einmal wiederholen");
+  note(sent);
+  await api("PUT", playPath, body);
+  const retryAt = Date.now();
+  await sleep(VERIFY_WAIT_MS);
+  const again = await checkPlayback("Prüfung Playlist 2");
+  const ok2 = Boolean(again?.isPlaying && again.uri);
+  note(
+    `Prüfung Playlist 2: ${ok2 ? "läuft ✓" : "läuft nicht"} (item.uri: ${again?.uri ? "ja" : "leer"}, spielt: ${
+      again?.isPlaying ? "ja" : "nein"
+    })`,
+    { status: ok2 ? "ok" : "fehlt" }
+  );
+  if (ok2) return { acceptedAt: retryAt, retried: true, state: again };
+
   throw new SpotifyError(
     "not-playing",
     `Playlist-Play angenommen, aber es läuft nichts. Position prüfen. Falls die Playlist privat ist: ${PLAYLIST_PUBLIC_HINT}.`,
     0,
     { reason: "NOT_PLAYING" }
   );
+}
+
+/**
+ * Playlist-Metadaten und alle Tracks laden (paginiert).
+ * @returns {Promise<{ id: string, title: string, tracks: Array<{ id: string, uri: string, title: string, artist: string, year: number, album: string, albumType: string }> }>}
+ */
+export async function fetchPlaylistCatalog(playlistInput) {
+  const parsed = parsePlaylistInput(playlistInput);
+  if (!parsed.uri) throw new SpotifyError("bad-playlist", parsed.error);
+  const id = parsed.uri.slice("spotify:playlist:".length);
+  const meta = await api("GET", `/playlists/${encodeURIComponent(id)}?fields=id,name`);
+  const title = meta?.name || "Playlist";
+  const tracks = [];
+  let offset = 0;
+  const limit = 50;
+  for (;;) {
+    const page = await api(
+      "GET",
+      `/playlists/${encodeURIComponent(id)}/tracks?limit=${limit}&offset=${offset}&fields=items(track(id,uri,name,artists(name),album(name,release_date,album_type))),next`
+    );
+    const items = Array.isArray(page?.items) ? page.items : [];
+    for (const row of items) {
+      const track = row?.track;
+      if (!track?.id || track.type === "episode") continue;
+      const release = String(track.album?.release_date || "");
+      const year = Number((release.match(/^(\d{4})/) || [])[1]) || 0;
+      tracks.push({
+        id: track.id,
+        uri: track.uri || `spotify:track:${track.id}`,
+        title: track.name || "Ohne Titel",
+        artist: (Array.isArray(track.artists) ? track.artists : [])
+          .map((a) => a?.name)
+          .filter(Boolean)
+          .join(", "),
+        year,
+        album: track.album?.name || "",
+        albumType: track.album?.album_type || "",
+      });
+    }
+    if (!page?.next || items.length < limit) break;
+    offset += limit;
+  }
+  note(`Playlist geladen: ${title} · ${tracks.length} Songs`);
+  return { id, title, tracks };
 }
 
 async function verifyPlaying(uri, deviceId, label) {

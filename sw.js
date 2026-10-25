@@ -8,7 +8,7 @@
  * skipWaiting läuft nicht von selbst – erst, wenn das Banner angetippt wird.
  */
 
-const CACHE_NAME = "kajuete-v33";
+const CACHE_NAME = "kajuete-v34";
 
 const PRECACHE = [
   "./",
@@ -35,6 +35,12 @@ const PRECACHE = [
   "./shared/spotify-config.js",
   "./shared/spotify.js",
   "./shared/mute-button.js",
+  "./shared/orientation.js",
+  "./games/zeitsprung/index.html",
+  "./games/zeitsprung/game.css",
+  "./games/zeitsprung/ui.js",
+  "./games/zeitsprung/suspicious.js",
+  "./games/zeitsprung/songlist-store.js",
   "./games/tapper/index.html",
   "./games/tapper/game.css",
   "./games/tapper/logic.js",

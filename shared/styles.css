@@ -876,3 +876,48 @@ body.spotify-test [data-online] > .screen > .screen-dock {
   background: transparent;
 }
 
+body.spotify-test .spotify-diagnose-box {
+  margin-top: 0.75rem;
+  border-top: 1px solid rgba(244, 239, 230, 0.12);
+  padding-top: 0.5rem;
+}
+
+body.spotify-test .spotify-diagnose-box > summary {
+  cursor: pointer;
+  font-weight: 700;
+  list-style: none;
+}
+
+body.spotify-test .spotify-diagnose-box > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Orientierung: Manifest „any“, Spiele sperren selbst. */
+.orientation-lock {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgba(21, 32, 51, 0.96);
+  color: var(--ink, #f4efe6);
+  text-align: center;
+}
+
+.orientation-lock[hidden] {
+  display: none !important;
+}
+
+.orientation-lock p {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.35;
+  max-width: 16rem;
+}
+
+html.orientation-wrong body {
+  overflow: hidden;
+}
+
