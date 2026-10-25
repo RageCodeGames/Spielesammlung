@@ -787,6 +787,18 @@ body.spotify-test .spotify-plays-on {
   font-size: 1.05rem;
 }
 
+body.spotify-test .spotify-sleep-hint {
+  margin: 0.75rem 0;
+  padding: 0.85rem 1rem;
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--bad, #b42318);
+  background: rgba(180, 35, 24, 0.12);
+  border: 2px solid rgba(180, 35, 24, 0.45);
+  border-radius: 0.5rem;
+}
+
 body.spotify-test .switch-row {
   display: flex;
   align-items: center;

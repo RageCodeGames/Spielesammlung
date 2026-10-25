@@ -35,14 +35,20 @@ import {
   setPreferredDeviceId,
   TEST_TRACK_URI,
 } from "../shared/spotify.js";
+import { get, set } from "../shared/storage.js";
 
 const app = document.getElementById("app");
 const NO_DEVICE_HINT =
   "Öffne Spotify, starte kurz einen Song und pausiere ihn, dann aktualisieren.";
 const PICK_DEVICE_HINT = "Bitte Gerät auswählen";
+const SLEEP_HINT = "Dein Spotify schläft – öffne kurz Spotify und tippe auf Bereit";
 const SAME_ACCOUNT_HINT =
   "Ein Spotify-Konto kann nur auf einem Gerät gleichzeitig abspielen";
 const END_MARGIN_MS = 2000;
+const CUE_MAX_AGE_MS = 20_000;
+const SILENCE_URI_KEY = "kajuete:spotify-silence-uri";
+const SILENCE_BETWEEN_KEY = "kajuete:spotify-silence-between";
+const PLAYLIST_URI_KEY = "kajuete:spotify-playlist";
 
 let session = getStoredSession();
 let devices = [];
@@ -176,29 +182,110 @@ function pickDeviceId(list = devices) {
   return list.find((row) => row.active)?.id || list[0]?.id || "";
 }
 
+function showSleepHint() {
+  const hint = app.querySelector("[data-local-hint]");
+  const banner = app.querySelector("[data-sleep-hint]");
+  showNote(hint, SLEEP_HINT, true);
+  if (banner) {
+    banner.hidden = false;
+    banner.textContent = SLEEP_HINT;
+  }
+  logDiagnose(SLEEP_HINT);
+}
+
+function clearSleepHint() {
+  const banner = app.querySelector("[data-sleep-hint]");
+  if (banner) {
+    banner.hidden = true;
+    banner.textContent = "";
+  }
+}
+
+function isDeviceMissingError(err) {
+  return (
+    err?.code === "no-device" ||
+    err?.reason === "NO_ACTIVE_DEVICE" ||
+    /no active device|kein aktives gerät|schläft/i.test(String(err?.message || ""))
+  );
+}
+
 /**
  * Für Abspielen: falls nötig Geräte neu laden.
- * Bei genau einem Gerät automatisch nehmen, sonst „Bitte Gerät auswählen“.
+ * Bei genau einem Gerät automatisch nehmen, sonst Schlaf-Hinweis.
  */
 async function ensurePlayDevice({ reloadIfMissing = true } = {}) {
   const hint = app.querySelector("[data-local-hint]");
   let id = selectedDeviceId();
-  if (id && devices.some((row) => row.id === id)) return id;
+  if (id && devices.some((row) => row.id === id)) {
+    clearSleepHint();
+    return id;
+  }
   if (!reloadIfMissing) {
-    showNote(hint, devices.length ? PICK_DEVICE_HINT : NO_DEVICE_HINT, true);
+    if (!devices.length) showSleepHint();
+    else showNote(hint, PICK_DEVICE_HINT, true);
     paintSelectedDevice();
     return "";
   }
+  logDiagnose("Gerät fehlt in der Liste – Geräte neu laden");
   await refreshDevices();
   id = selectedDeviceId();
-  if (id && devices.some((row) => row.id === id)) return id;
-  showNote(hint, devices.length ? PICK_DEVICE_HINT : NO_DEVICE_HINT, true);
+  if (id && devices.some((row) => row.id === id)) {
+    clearSleepHint();
+    return id;
+  }
+  if (!devices.length) showSleepHint();
+  else showNote(hint, PICK_DEVICE_HINT, true);
   paintSelectedDevice();
   return "";
 }
 
-/** Gemeinsamer Start: Lag, Hinweis, Countdown – für play / Warteschlange / Playlist. */
-async function startHere(runner, clip, sentAt) {
+function silenceUriFromStoreOrInput() {
+  const fromInput = parseTrackInput(app.querySelector("[name=silence]")?.value || "").uri;
+  if (fromInput) return fromInput;
+  return parseTrackInput(get(SILENCE_URI_KEY, "") || "").uri;
+}
+
+function playlistUriFromStoreOrInput() {
+  const fromInput = parsePlaylistInput(app.querySelector("[name=playlist]")?.value || "").uri;
+  if (fromInput) return fromInput;
+  return parsePlaylistInput(get(PLAYLIST_URI_KEY, "") || "").uri;
+}
+
+function silenceBetweenEnabled() {
+  const box = app.querySelector("[name=silence-between]");
+  if (box) return box.checked === true;
+  const stored = get(SILENCE_BETWEEN_KEY, null);
+  if (stored === null || stored === undefined) return Boolean(silenceUriFromStoreOrInput());
+  return stored === true;
+}
+
+function persistSilenceSettings() {
+  const silenceRaw = app.querySelector("[name=silence]")?.value || "";
+  const parsed = parseTrackInput(silenceRaw);
+  set(SILENCE_URI_KEY, parsed.uri || (silenceRaw.trim() ? silenceRaw.trim() : null));
+  const box = app.querySelector("[name=silence-between]");
+  if (box) set(SILENCE_BETWEEN_KEY, box.checked === true);
+  const pl = parsePlaylistInput(app.querySelector("[name=playlist]")?.value || "");
+  if (pl.uri) set(PLAYLIST_URI_KEY, pl.uri);
+}
+
+function paintSilencePreview() {
+  const node = app.querySelector("[data-silence-preview]");
+  const input = app.querySelector("[name=silence]");
+  if (!node || !input) return;
+  if (!input.value.trim()) {
+    showNote(node, "");
+    return;
+  }
+  const { uri, error } = parseTrackInput(input.value);
+  showNote(node, uri ? `Stille-URI: ${uri}` : error, !uri);
+}
+
+/**
+ * Gemeinsamer Start: Lag, Hinweis, Countdown – für play / Warteschlange / Playlist.
+ * @param {{ noCountdown?: boolean, countdownText?: string }} [options]
+ */
+async function startHere(runner, clip, sentAt, options = {}) {
   muted = isMuted();
   const lagNode = app.querySelector("[data-lag]");
   const hint = app.querySelector("[data-local-hint]");
@@ -209,30 +296,59 @@ async function startHere(runner, clip, sentAt) {
     logDiagnose("Abspiel gestoppt: dieses Gerät ist stumm");
     return;
   }
-  const id = await ensurePlayDevice({ reloadIfMissing: true });
+  let id = await ensurePlayDevice({ reloadIfMissing: true });
   if (!id) {
     if (lagNode) lagNode.textContent = "";
-    logDiagnose(`Abspiel gestoppt: kein Gerät gewählt (${devices.length} in der Liste)`);
+    logDiagnose(`Abspiel gestoppt: kein Gerät (${devices.length} in der Liste)`);
     return;
   }
-  const device = devices.find((row) => row.id === id);
-  logDiagnose(
-    `Abspiel startet lokal · Gerät=${device?.name || id} · eigenes Token · ${isHost() ? "Host" : "Mitspieler"}`
-  );
+
+  const runOnce = async (deviceId) => {
+    const device = devices.find((row) => row.id === deviceId);
+    logDiagnose(
+      `Abspiel startet lokal · Gerät=${device?.name || deviceId} · eigenes Token · ${
+        isHost() ? "Host" : "Mitspieler"
+      }`
+    );
+    return runner(deviceId);
+  };
+
   const t0 = Number(sentAt) || Date.now();
   if (lagNode) lagNode.textContent = "Starte …";
   try {
-    const result = await runner(id);
+    let result;
+    try {
+      result = await runOnce(id);
+    } catch (err) {
+      if (!isDeviceMissingError(err)) throw err;
+      logDiagnose("Gerät fehlt beim Befehl – neu laden und einmal erneut versuchen");
+      await refreshDevices();
+      id = selectedDeviceId();
+      if (!id || !devices.some((row) => row.id === id)) {
+        showSleepHint();
+        if (lagNode) lagNode.textContent = "";
+        return;
+      }
+      result = await runOnce(id);
+    }
     const lag = (result?.acceptedAt || Date.now()) - t0;
     if (lagNode) {
       lagNode.textContent = `Abspielen bestätigt nach ${lag} ms${result?.retried ? " (nach Wiederholung)" : ""}`;
     }
+    clearSleepHint();
     showNote(hint, "");
+    if (options.noCountdown) {
+      stopCountdown();
+      const node = app.querySelector("[data-countdown]");
+      if (node) node.textContent = options.countdownText || "Stille läuft (Gerät wach).";
+      return;
+    }
     startCountdown(clip, result?.state);
   } catch (err) {
     if (lagNode) lagNode.textContent = "";
     logDiagnose(`Abspiel fehlgeschlagen: ${explainError(err)}`);
-    showError(hint, err, "Abspielen");
+    if (isDeviceMissingError(err) || !devices.length) showSleepHint();
+    else showError(hint, err, "Abspielen");
   }
 }
 
@@ -292,6 +408,63 @@ function stopCountdown() {
   if (node) node.textContent = "";
 }
 
+async function playSilenceHere(reason) {
+  const hint = app.querySelector("[data-local-hint]");
+  const silenceUri = silenceUriFromStoreOrInput();
+  const playlistUri = playlistUriFromStoreOrInput();
+  if (!silenceUri) {
+    showNote(hint, "Bitte einen Stille-Track eintragen (muss in der Playlist liegen).", true);
+    return false;
+  }
+  if (!playlistUri) {
+    showNote(hint, "Bitte einen Playlist-Link eintragen (mit Stille-Track).", true);
+    return false;
+  }
+  logDiagnose(`Stille starten (${reason}) · ${silenceUri}`);
+  await startHere(
+    (id) => playViaPlaylist(playlistUri, { trackUri: silenceUri }, id),
+    0,
+    Date.now(),
+    { noCountdown: true, countdownText: "Stille läuft (Gerät wach)." }
+  );
+  return true;
+}
+
+async function endClipPlayback(label, { beforeEnd, seconds }) {
+  muted = isMuted();
+  if (muted) {
+    if (label) label.textContent = "Stumm – kein Pause nötig";
+    return;
+  }
+  const useSilence = silenceBetweenEnabled() && silenceUriFromStoreOrInput() && playlistUriFromStoreOrInput();
+  if (useSilence) {
+    if (label) label.textContent = "Stille …";
+    const ok = await playSilenceHere(beforeEnd ? "vor Songende" : "nach Clip");
+    if (ok) {
+      const hint = app.querySelector("[data-local-hint]");
+      showNote(
+        hint,
+        beforeEnd ? "Stille nach Songende (Gerät bleibt wach)." : `Stille nach ${seconds}s (Gerät bleibt wach).`
+      );
+    }
+    return;
+  }
+  const id = selectedDeviceId();
+  try {
+    await pause(id);
+    if (label) label.textContent = "Pausiert";
+    const hint = app.querySelector("[data-local-hint]");
+    showNote(
+      hint,
+      beforeEnd ? "Automatisch pausiert (kurz vor Songende)." : `Automatisch pausiert (${seconds} Sekunden).`
+    );
+  } catch (err) {
+    if (label) label.textContent = "Pause fehlgeschlagen";
+    const hint = app.querySelector("[data-local-hint]");
+    if (hint) showError(hint, err, "Pause");
+  }
+}
+
 function startCountdown(seconds, state) {
   stopCountdown();
   const node = app.querySelector("[data-countdown]");
@@ -299,38 +472,29 @@ function startCountdown(seconds, state) {
   const endMs = msUntilSongEnd(state) || Infinity;
   const waitMs = Math.min(clipMs, endMs);
   if (waitMs === Infinity) {
-    if (node) node.textContent = "Ganzer Song – Länge unbekannt, kein automatisches Pause.";
+    if (node) {
+      node.textContent = silenceBetweenEnabled()
+        ? "Ganzer Song – Länge unbekannt; Stille erst nach manuellem Stopp."
+        : "Ganzer Song – Länge unbekannt, kein automatisches Pause.";
+    }
     return;
   }
   const beforeEnd = endMs <= clipMs;
-  const doneText = beforeEnd ? "Automatisch pausiert (kurz vor Songende)." : `Automatisch pausiert (${seconds} Sekunden).`;
   countdownUntil = Date.now() + waitMs;
-  let pausing = false;
+  let ending = false;
   const tick = async () => {
     const left = Math.max(0, Math.ceil((countdownUntil - Date.now()) / 1000));
     const label = app.querySelector("[data-countdown]");
+    const useSilence = silenceBetweenEnabled() && silenceUriFromStoreOrInput();
     if (label) {
-      label.textContent = left ? `${beforeEnd ? "Pause vor Songende" : "Pause"} in ${left}s` : "Pausiere …";
+      const verb = useSilence ? "Stille" : beforeEnd ? "Pause vor Songende" : "Pause";
+      label.textContent = left ? `${verb} in ${left}s` : useSilence ? "Stille …" : "Pausiere …";
     }
-    if (left > 0 || pausing) return;
-    pausing = true;
+    if (left > 0 || ending) return;
+    ending = true;
     window.clearInterval(countdownTimer);
     countdownTimer = 0;
-    if (muted) {
-      if (label) label.textContent = "Stumm – kein Pause nötig";
-      return;
-    }
-    const id = selectedDeviceId();
-    try {
-      await pause(id);
-      if (label) label.textContent = "Pausiert";
-      const hint = app.querySelector("[data-local-hint]");
-      showNote(hint, doneText);
-    } catch (err) {
-      if (label) label.textContent = "Pause fehlgeschlagen";
-      const hint = app.querySelector("[data-local-hint]");
-      if (hint) showError(hint, err, "Pause");
-    }
+    await endClipPlayback(label, { beforeEnd, seconds });
   };
   countdownTimer = window.setInterval(tick, 250);
   tick();
@@ -342,10 +506,21 @@ async function pauseHere() {
   if (!id) return;
   try {
     await pause(id);
+    logDiagnose("Wirklich pausiert (Stumm-Knopf)");
+    const node = app.querySelector("[data-countdown]");
+    if (node) node.textContent = "Pausiert (Stumm)";
   } catch (err) {
     const hint = app.querySelector("[data-local-hint]");
     if (hint) showError(hint, err, "Stumm-Pause");
   }
+}
+
+async function keepAwakeStart() {
+  persistSilenceSettings();
+  const hint = app.querySelector("[data-local-hint]");
+  stopCountdown();
+  const ok = await playSilenceHere("Wach halten");
+  if (ok) showNote(hint, "Wach halten: Stille läuft.");
 }
 
 async function playHere(trackUri, startMs, clip, sentAt) {
@@ -369,10 +544,19 @@ function playlistTargetFromInputs({ forceMode = "" } = {}) {
   if (!playlist.uri) return { playlistUri: "", trackUri: "", position: 0, error: playlist.error };
   const position = Math.max(0, Math.floor(Number(app.querySelector("[name=playlist-offset]")?.value) || 0));
   const trackRaw = app.querySelector("[name=track]")?.value || "";
+  const silenceUri = silenceUriFromStoreOrInput();
   const useTrack = forceMode === "track" || (forceMode !== "position" && trackRaw.trim());
   if (!useTrack) return { playlistUri: playlist.uri, trackUri: "", position, error: "" };
   const track = parseTrackInput(trackRaw);
   if (!track.uri) return { playlistUri: "", trackUri: "", position: 0, error: track.error };
+  if (silenceUri && track.uri === silenceUri) {
+    return {
+      playlistUri: "",
+      trackUri: "",
+      position: 0,
+      error: "Der Stille-Track darf nicht als Spielsong gewählt werden.",
+    };
+  }
   return { playlistUri: playlist.uri, trackUri: track.uri, position: 0, error: "" };
 }
 
@@ -477,16 +661,31 @@ async function applyCue(raw, source) {
     logDiagnose(`Befehl schon verarbeitet · cueId=${cue.cueId} · Quelle=${source}`);
     return;
   }
-  lastCueId = cue.cueId;
 
-  const songBit = cue.trackUri
-    ? `Song-ID=${cue.trackUri}`
-    : `Position=${cue.position}`;
+  const ageMs = Date.now() - cue.sentAt;
+  const songBit = cue.trackUri ? `Song-ID=${cue.trackUri}` : `Position=${cue.position}`;
+  if (ageMs > CUE_MAX_AGE_MS) {
+    lastCueId = cue.cueId;
+    logDiagnose(
+      `Befehl verpasst (${Math.round(ageMs / 1000)}s alt, Limit ${CUE_MAX_AGE_MS / 1000}s) · Playlist=${
+        cue.playlistUri || "–"
+      } · ${songBit} · Zeit=${formatCueStamp(cue.sentAt)} · cueId=${cue.cueId} · Quelle=${source}`
+    );
+    return;
+  }
+
+  lastCueId = cue.cueId;
   logDiagnose(
     `Befehl vom Host empfangen · Playlist=${cue.playlistUri || "–"} · ${songBit} · Zeit=${formatCueStamp(
       cue.sentAt
     )} · cueId=${cue.cueId} · Quelle=${source}`
   );
+
+  const silenceUri = silenceUriFromStoreOrInput();
+  if (silenceUri && cue.trackUri && cue.trackUri === silenceUri) {
+    logDiagnose("Befehl ignoriert: Stille-Track darf kein Spielsong sein");
+    return;
+  }
 
   if (cue.playlistUri) {
     await playPlaylistHere(cue.playlistUri, cueTarget(cue), cue.clipSec, cue.sentAt);
@@ -687,8 +886,18 @@ function showRoomPlay(initial) {
 
 function render() {
   const keepTrack = app.querySelector("[name=track]")?.value || "";
-  const keepPlaylist = app.querySelector("[name=playlist]")?.value || "";
+  const keepPlaylist =
+    app.querySelector("[name=playlist]")?.value || get(PLAYLIST_URI_KEY, "") || "";
   const keepOffset = app.querySelector("[name=playlist-offset]")?.value || "0";
+  const keepSilence =
+    app.querySelector("[name=silence]")?.value || get(SILENCE_URI_KEY, "") || "";
+  const silenceParsed = parseTrackInput(keepSilence);
+  const storedBetween = get(SILENCE_BETWEEN_KEY, null);
+  const keepSilenceBetween =
+    app.querySelector("[name=silence-between]")?.checked ??
+    (storedBetween === null || storedBetween === undefined
+      ? Boolean(silenceParsed.uri)
+      : storedBetween === true);
   const keepClip = clipSec;
   lobby?.destroy();
   lobby = null;
@@ -728,6 +937,10 @@ function render() {
   if (bootError) hint.textContent = bootError;
   else hint.hidden = true;
   body.append(hint);
+  const sleepBanner = el("p", "spotify-sleep-hint");
+  sleepBanner.setAttribute("data-sleep-hint", "1");
+  sleepBanner.hidden = true;
+  body.append(sleepBanner);
 
   if (!isConfigured()) {
     body.append(
@@ -796,7 +1009,10 @@ function render() {
     plInput.autocomplete = "off";
     plInput.spellcheck = false;
     plInput.value = keepPlaylist;
-    plInput.addEventListener("input", paintPlaylistPreview);
+    plInput.addEventListener("input", () => {
+      paintPlaylistPreview();
+      persistSilenceSettings();
+    });
     plLabel.append(plInput);
     body.append(plLabel);
     const plPreview = el("p", "note spotify-uri");
@@ -828,6 +1044,54 @@ function render() {
     offsetInput.value = keepOffset;
     offsetLabel.append(offsetInput);
     body.append(offsetLabel);
+
+    body.append(el("h2", "lobby-list-title", "Stille (Gerät wach halten)"));
+    body.append(
+      el(
+        "p",
+        "note",
+        "Lege einen stummen/leisen Track in dieselbe Playlist. Nach dem Clip startet die Stille statt Pause – so bleibt Spotify auf dem iPhone erreichbar."
+      )
+    );
+    const silenceLabel = el("label", "lobby-field", "Stille-Track");
+    const silenceInput = el("input", "text-input");
+    silenceInput.name = "silence";
+    silenceInput.placeholder = "https://open.spotify.com/track/…";
+    silenceInput.autocomplete = "off";
+    silenceInput.spellcheck = false;
+    silenceInput.value = keepSilence;
+    silenceInput.addEventListener("input", () => {
+      paintSilencePreview();
+      const box = app.querySelector("[name=silence-between]");
+      const parsed = parseTrackInput(silenceInput.value);
+      if (box && get(SILENCE_BETWEEN_KEY, null) === null) box.checked = Boolean(parsed.uri);
+      persistSilenceSettings();
+    });
+    silenceLabel.append(silenceInput);
+    body.append(silenceLabel);
+    const silencePreview = el("p", "note spotify-uri");
+    silencePreview.setAttribute("data-silence-preview", "1");
+    silencePreview.hidden = true;
+    body.append(silencePreview);
+    const silenceRow = el("label", "switch-row");
+    const silenceCheck = document.createElement("input");
+    silenceCheck.type = "checkbox";
+    silenceCheck.name = "silence-between";
+    silenceCheck.checked = keepSilenceBetween;
+    silenceCheck.addEventListener("change", persistSilenceSettings);
+    silenceRow.append(silenceCheck, el("span", "", "Zwischen den Songs Stille abspielen"));
+    body.append(silenceRow);
+    const keepAwakeBtn = el("button", "btn", "Wach halten starten");
+    keepAwakeBtn.type = "button";
+    keepAwakeBtn.addEventListener("click", async () => {
+      keepAwakeBtn.disabled = true;
+      try {
+        await keepAwakeStart();
+      } finally {
+        keepAwakeBtn.disabled = false;
+      }
+    });
+    body.append(keepAwakeBtn);
 
     body.append(el("h2", "lobby-list-title", "Dauer"));
     const times = el("div", "btn-row");
@@ -931,6 +1195,7 @@ function render() {
   showLobby();
   paintTrackPreview();
   paintPlaylistPreview();
+  paintSilencePreview();
   if (session) refreshDevices();
 }
 
