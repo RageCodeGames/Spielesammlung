@@ -50,9 +50,17 @@ export function mountOrientation(preferred = "portrait") {
     }
   };
 
+  /** Hinweis nur auf Touch; Maus/PC nie blockieren. */
+  const isTouchUi = () => window.matchMedia("(pointer: coarse)").matches;
+
   const apply = () => {
     if (textNode) textNode.textContent = HINTS[mode];
     document.documentElement.dataset.orientationPrefer = mode;
+    if (!isTouchUi()) {
+      overlay.hidden = true;
+      document.documentElement.classList.remove("orientation-wrong");
+      return;
+    }
     const landscape = window.matchMedia("(orientation: landscape)").matches;
     const wrong = mode === "portrait" ? landscape : !landscape;
     overlay.hidden = !wrong;
@@ -60,10 +68,13 @@ export function mountOrientation(preferred = "portrait") {
     applyLock();
   };
 
-  const mql = window.matchMedia("(orientation: landscape)");
+  const mqlOrient = window.matchMedia("(orientation: landscape)");
+  const mqlPointer = window.matchMedia("(pointer: coarse)");
   const onChange = () => apply();
-  if (typeof mql.addEventListener === "function") mql.addEventListener("change", onChange);
-  else if (typeof mql.addListener === "function") mql.addListener(onChange);
+  if (typeof mqlOrient.addEventListener === "function") mqlOrient.addEventListener("change", onChange);
+  else if (typeof mqlOrient.addListener === "function") mqlOrient.addListener(onChange);
+  if (typeof mqlPointer.addEventListener === "function") mqlPointer.addEventListener("change", onChange);
+  else if (typeof mqlPointer.addListener === "function") mqlPointer.addListener(onChange);
   window.addEventListener("orientationchange", onChange);
   apply();
 
@@ -73,8 +84,10 @@ export function mountOrientation(preferred = "portrait") {
       apply();
     },
     destroy() {
-      if (typeof mql.removeEventListener === "function") mql.removeEventListener("change", onChange);
-      else if (typeof mql.removeListener === "function") mql.removeListener(onChange);
+      if (typeof mqlOrient.removeEventListener === "function") mqlOrient.removeEventListener("change", onChange);
+      else if (typeof mqlOrient.removeListener === "function") mqlOrient.removeListener(onChange);
+      if (typeof mqlPointer.removeEventListener === "function") mqlPointer.removeEventListener("change", onChange);
+      else if (typeof mqlPointer.removeListener === "function") mqlPointer.removeListener(onChange);
       window.removeEventListener("orientationchange", onChange);
       overlay.remove();
       document.documentElement.classList.remove("orientation-wrong");
