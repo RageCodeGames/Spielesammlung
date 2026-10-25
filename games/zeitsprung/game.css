@@ -1,3 +1,9 @@
+body.zeitsprung #app {
+  padding-top: var(--safe-top);
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
 body.zeitsprung .zs-page .screen-body {
   gap: 0.75rem;
 }
@@ -97,4 +103,249 @@ body.zeitsprung .zs-correction-list {
 
 body.zeitsprung .zs-correction-list.is-bad {
   color: var(--bad, #b42318);
+}
+
+body.zeitsprung .mute-btn {
+  width: 48px;
+  min-width: 48px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+
+body.zeitsprung .mute-btn.is-muted {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+body.zeitsprung .mute-btn svg {
+  display: block;
+}
+
+body.zeitsprung .spotify-sleep-hint {
+  margin: 0.4rem 0;
+  padding: 0.55rem 0.7rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #f3c0b8;
+  background: rgba(180, 35, 24, 0.18);
+  border-radius: 0.5rem;
+}
+
+body.zeitsprung .zs-play {
+  width: 100%;
+  max-width: none;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+}
+
+body.zeitsprung .zs-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.2rem 0.6rem;
+  gap: 0.5rem;
+}
+
+body.zeitsprung .zs-bar-tools {
+  margin-left: auto;
+}
+
+body.zeitsprung .zs-board {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.zeitsprung .zs-upper,
+body.zeitsprung .zs-lower {
+  min-height: 0;
+  overflow: hidden;
+  padding: 0.25rem 0.65rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+body.zeitsprung .zs-lower {
+  border-top: 1px solid rgba(244, 239, 230, 0.14);
+}
+
+body.zeitsprung .zs-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+}
+
+body.zeitsprung .zs-token {
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: var(--surface);
+}
+
+body.zeitsprung .zs-token.is-on {
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+}
+
+body.zeitsprung .zs-tl-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 0;
+  flex: 1;
+}
+
+body.zeitsprung .zs-tl {
+  display: flex;
+  align-items: stretch;
+  gap: 0.35rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2rem 0 0.4rem;
+  -webkit-overflow-scrolling: touch;
+  min-height: 0;
+  flex: 1;
+}
+
+body.zeitsprung .zs-card {
+  flex: 0 0 auto;
+  width: 7.2rem;
+  padding: 0.4rem 0.45rem;
+  border-radius: 0.7rem;
+  background: #2c241c;
+  border: 1px solid rgba(227, 164, 74, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+body.zeitsprung .zs-card-year {
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+body.zeitsprung .zs-card-title,
+body.zeitsprung .zs-card-artist {
+  font-size: 0.72rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body.zeitsprung .zs-card-artist {
+  opacity: 0.75;
+}
+
+body.zeitsprung .zs-gap {
+  flex: 0 0 auto;
+  width: 1.7rem;
+  min-height: 4.2rem;
+  border-radius: 0.45rem;
+  border: 1px dashed rgba(244, 239, 230, 0.28);
+  background: transparent;
+  color: var(--text);
+}
+
+body.zeitsprung .zs-gap.is-idle {
+  opacity: 0.25;
+}
+
+body.zeitsprung .zs-gap.is-on,
+body.zeitsprung .zs-gap.is-pick {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(227, 164, 74, 0.15);
+}
+
+body.zeitsprung .zs-lock {
+  align-self: center;
+  width: auto;
+  min-width: 7rem;
+}
+
+body.zeitsprung .zs-vinyl {
+  width: 6.4rem;
+  height: 6.4rem;
+  margin: 0 auto;
+  border-radius: 50%;
+  border: 0;
+  background:
+    radial-gradient(circle at 50% 50%, #c9a36a 0 14%, #1a120e 15% 18%, #3b2a22 19% 72%, #0c0a09 73%);
+  color: #f4efe6;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+}
+
+body.zeitsprung .zs-vinyl-q {
+  font-size: 1.8rem;
+  font-weight: 800;
+}
+
+body.zeitsprung .zs-reveal-title {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 800;
+}
+
+body.zeitsprung .zs-reveal-meta {
+  margin: 0;
+  opacity: 0.85;
+}
+
+body.zeitsprung .zs-win {
+  margin: 0;
+}
+
+body.zeitsprung .zs-mine-label {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+  opacity: 0.75;
+}
+
+body.zeitsprung .zs-flip {
+  margin-top: auto;
+  font-size: 0.88rem;
+}
+
+body.zeitsprung .zs-lobby-me {
+  display: grid;
+  gap: 0.5rem;
+}
+
+body.zeitsprung .zs-play .switch-row {
+  min-height: 40px;
+  width: auto;
+  padding: 0.35rem 0.65rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+body.zeitsprung .zs-vinyl:disabled {
+  opacity: 0.85;
+}
+
+body.zeitsprung .zs-upper {
+  overflow: auto;
+}
+
+body.zeitsprung .toast {
+  position: fixed;
+  z-index: 40;
+  left: 50%;
+  bottom: calc(1.2rem + var(--safe-bottom));
+  transform: translateX(-50%);
+  padding: 0.55rem 0.9rem;
+  border-radius: 999px;
+  background: #2a1c14;
+  box-shadow: var(--shadow);
+  font-weight: 700;
 }

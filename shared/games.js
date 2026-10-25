@@ -51,7 +51,7 @@ export const games = [
   {
     id: "zeitsprung",
     name: "Zeitsprung",
-    description: "Songlisten aus Spotify vorbereiten (Spiel folgt).",
+    description: "Songs auf der Zeitleiste einsortieren.",
     emoji: "⏪",
     href: "./games/zeitsprung/index.html",
     available: true,

@@ -219,6 +219,7 @@ function mapRoom(code, data) {
       dummy: player?.dummy === true || String(id).startsWith("sim-"),
       spotifyName: typeof player?.spotifyName === "string" ? player.spotifyName : "",
       spotifyUserId: typeof player?.spotifyUserId === "string" ? player.spotifyUserId : "",
+      spotifyStatus: typeof player?.spotifyStatus === "string" ? player.spotifyStatus : "",
     }))
     .sort((a, b) => a.seat - b.seat || a.joinedAt - b.joinedAt);
   return {
@@ -906,6 +907,7 @@ export async function addDummyPlayer(displayName) {
       seat,
       joinedAt: Date.now(),
       dummy: true,
+      spotifyStatus: "muted",
     });
     return id;
   } catch (err) {

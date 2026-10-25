@@ -94,6 +94,7 @@ Während eines laufenden Spiels, je nach Spiel:
 - **Tapper:** der Spieler fliegt aus der Reihenfolge; bei weniger als 2 Spielern endet die Runde.
 - **Tempelgold:** die Runde kann nicht weitergehen. Ende mit Hinweis und aufgedeckten Rollen.
 - **Malen & Raten:** der Spieler fliegt raus; malt er gerade, wird die Runde übersprungen. Bei weniger als 3 Spielern endet das Spiel.
+- **Zeitsprung:** der Spieler fliegt aus der Reihenfolge; bei weniger als 2 Spielern endet das Spiel.
 
 Spiele rufen `closeRoom()` (Host) bzw. `leavePlay()` (Mitspieler) auf; die Lobby nutzt dieselben Bestätigungen.
 

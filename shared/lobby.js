@@ -645,7 +645,10 @@ export function mountLobby(root, options = {}) {
       const tags = [];
       if (player.isSelf) tags.push("Du");
       if (player.isHost) tags.push("Host");
-      if (player.spotifyName) tags.push(player.spotifyName);
+      if (player.dummy || player.spotifyStatus === "muted") tags.push("Stumm");
+      else if (player.spotifyStatus === "ready") tags.push("Spotify bereit");
+      else if (player.spotifyStatus === "sleep") tags.push("Spotify schläft – öffne kurz Spotify");
+      else if (player.spotifyName) tags.push(player.spotifyName);
       if (!player.online) tags.push("offline");
       const meta = el("span", "lobby-player-meta", tags.join(" · "));
       const info = el("div", "lobby-player-info");

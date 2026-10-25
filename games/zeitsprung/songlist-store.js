@@ -3,6 +3,7 @@
  */
 
 import { OnlineError, openDatabase } from "../../shared/online.js";
+import { DEFAULT_VARIANT_NAME } from "./rules.js";
 
 function jsonSafe(value) {
   return JSON.parse(JSON.stringify(value));
@@ -27,9 +28,11 @@ export function normalizeSonglist(raw, fallbackId = "") {
       excluded: row.excluded === true,
     };
   }
+  const name = String(raw?.name || "").trim() || DEFAULT_VARIANT_NAME;
   return {
     playlistId: String(raw?.playlistId || fallbackId),
     title: raw?.title || "Playlist",
+    name,
     updatedAt: Number(raw?.updatedAt) || 0,
     updatedBy: raw?.updatedBy || "",
     songs,
@@ -61,6 +64,7 @@ export async function saveSonglist(list) {
     const payload = jsonSafe({
       playlistId: id,
       title: list.title || "Playlist",
+      name: String(list.name || "").trim() || DEFAULT_VARIANT_NAME,
       updatedAt: Date.now(),
       updatedBy: uid || "",
       songs: list.songs && typeof list.songs === "object" ? list.songs : {},
@@ -101,8 +105,44 @@ export function mergeCatalogWithStored(catalog, stored) {
   return {
     playlistId: catalog.id,
     title: catalog.title,
+    name: stored?.name || DEFAULT_VARIANT_NAME,
     updatedAt: Date.now(),
     updatedBy: "",
     songs,
   };
+}
+
+/** Alle Varianten (Name + Anzahl spielbarer Songs). */
+export async function listSonglists() {
+  try {
+    const { db, ref, get } = await openDatabase();
+    const snap = await get(ref(db, "songlists"));
+    if (!snap.exists()) return [];
+    const raw = snap.val() && typeof snap.val() === "object" ? snap.val() : {};
+    const out = [];
+    for (const [id, row] of Object.entries(raw)) {
+      const list = normalizeSonglist(row, id);
+      if (!String(row?.name || "").trim()) {
+        try {
+          await saveSonglist(list);
+        } catch (err) {
+          console.error("[zeitsprung] Variantenname", err);
+        }
+      }
+      const playable = Object.values(list.songs).filter((song) => !song.excluded && (song.yearOverride || song.year)).length;
+      out.push({
+        playlistId: list.playlistId,
+        name: list.name || DEFAULT_VARIANT_NAME,
+        title: list.title,
+        songCount: playable,
+        updatedAt: list.updatedAt,
+      });
+    }
+    out.sort((a, b) => String(a.name).localeCompare(String(b.name), "de"));
+    return out;
+  } catch (err) {
+    console.error("[zeitsprung] Songlisten auflisten", err);
+    if (err instanceof OnlineError) throw err;
+    throw new OnlineError("songlist", err?.message || "Songlisten konnten nicht geladen werden.");
+  }
 }
