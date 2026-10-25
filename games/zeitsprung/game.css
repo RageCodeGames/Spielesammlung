@@ -70,3 +70,31 @@ body.zeitsprung .zs-year-meta {
   opacity: 0.7;
   margin-top: 0.2rem;
 }
+
+body.zeitsprung .zs-io {
+  margin: 0.35rem 0 0.15rem;
+}
+
+body.zeitsprung .zs-import-area {
+  min-height: 6.5rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+}
+
+body.zeitsprung .zs-correction {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.65rem 0;
+  border-top: 1px solid rgba(244, 239, 230, 0.12);
+}
+
+body.zeitsprung .zs-correction-list {
+  margin: 0.35rem 0 0.75rem;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+body.zeitsprung .zs-correction-list.is-bad {
+  color: var(--bad, #b42318);
+}

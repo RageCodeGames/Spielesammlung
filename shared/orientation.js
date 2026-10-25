@@ -1,6 +1,7 @@
 /**
  * Orientierungshinweis für Spiele.
- * Manifest ist "any"; jedes Spiel wählt portrait oder landscape.
+ * Manifest ist "any"; jedes Spiel wählt portrait oder landscape
+ * und kann während der Session umschalten (z. B. Zeitsprung).
  */
 
 const HINTS = {
@@ -10,10 +11,10 @@ const HINTS = {
 
 /**
  * @param {"portrait" | "landscape"} preferred
- * @returns {{ destroy: () => void }}
+ * @returns {{ setPreferred: (mode: "portrait" | "landscape") => void, destroy: () => void }}
  */
 export function mountOrientation(preferred = "portrait") {
-  const mode = preferred === "landscape" ? "landscape" : "portrait";
+  let mode = preferred === "landscape" ? "landscape" : "portrait";
   let overlay = document.querySelector("[data-orientation-lock]");
   if (!overlay) {
     overlay = document.createElement("div");
@@ -25,24 +26,26 @@ export function mountOrientation(preferred = "portrait") {
     overlay.append(text);
     document.body.append(overlay);
   }
-  const text = overlay.querySelector("[data-orientation-text]");
-  if (text) text.textContent = HINTS[mode];
+  const textNode = overlay.querySelector("[data-orientation-text]");
 
-  document.documentElement.dataset.orientationPrefer = mode;
+  const applyLock = () => {
+    try {
+      const lock = screen.orientation?.lock?.(mode);
+      if (lock && typeof lock.catch === "function") lock.catch(() => {});
+    } catch {
+      /* nur in installierter PWA / Fullscreen */
+    }
+  };
 
   const apply = () => {
+    if (textNode) textNode.textContent = HINTS[mode];
+    document.documentElement.dataset.orientationPrefer = mode;
     const landscape = window.matchMedia("(orientation: landscape)").matches;
     const wrong = mode === "portrait" ? landscape : !landscape;
     overlay.hidden = !wrong;
     document.documentElement.classList.toggle("orientation-wrong", wrong);
+    applyLock();
   };
-
-  try {
-    const lock = screen.orientation?.lock?.(mode);
-    if (lock && typeof lock.catch === "function") lock.catch(() => {});
-  } catch {
-    /* nur in installierter PWA / Fullscreen */
-  }
 
   const mql = window.matchMedia("(orientation: landscape)");
   const onChange = () => apply();
@@ -52,6 +55,10 @@ export function mountOrientation(preferred = "portrait") {
   apply();
 
   return {
+    setPreferred(next) {
+      mode = next === "landscape" ? "landscape" : "portrait";
+      apply();
+    },
     destroy() {
       if (typeof mql.removeEventListener === "function") mql.removeEventListener("change", onChange);
       else if (typeof mql.removeListener === "function") mql.removeListener(onChange);

@@ -8,7 +8,7 @@
  * skipWaiting läuft nicht von selbst – erst, wenn das Banner angetippt wird.
  */
 
-const CACHE_NAME = "kajuete-v35";
+const CACHE_NAME = "kajuete-v36";
 
 const PRECACHE = [
   "./",
@@ -39,6 +39,7 @@ const PRECACHE = [
   "./games/zeitsprung/index.html",
   "./games/zeitsprung/game.css",
   "./games/zeitsprung/ui.js",
+  "./games/zeitsprung/csv.js",
   "./games/zeitsprung/suspicious.js",
   "./games/zeitsprung/songlist-store.js",
   "./games/tapper/index.html",

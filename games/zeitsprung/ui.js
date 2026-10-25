@@ -10,11 +10,13 @@ import {
   parsePlaylistInput,
   redirectUri,
 } from "../../shared/spotify.js";
+import { buildSongCsv, parseYearCorrections } from "./csv.js";
 import { effectiveYear, isSuspiciousAlbum } from "./suspicious.js";
 import { loadSonglist, mergeCatalogWithStored, saveSonglist } from "./songlist-store.js";
 
 const app = document.getElementById("app");
-mountOrientation("landscape");
+/** Import/Lobby/Start: Hochformat. Querformat erst im laufenden Spiel (Zeitleiste). */
+const orientation = mountOrientation("portrait");
 
 let session = getStoredSession();
 let list = null;
@@ -24,6 +26,8 @@ let statusText = "";
 let statusBad = false;
 let saving = false;
 let bootError = "";
+/** @type {null | { changes: Array, unknown: Array, invalid: Array, raw: string }} */
+let correctionPreview = null;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -42,10 +46,17 @@ function setStatus(text, bad = false) {
   node.textContent = statusText;
 }
 
+/** Für später: Zeitleiste → Querformat, Spielende → Hochformat. */
+export function setZeitsprungPlayOrientation(playing) {
+  orientation.setPreferred(playing ? "landscape" : "portrait");
+}
+
 function songRows() {
   if (!list?.songs) return [];
-  return Object.values(list.songs).sort((a, b) =>
-    String(a.title).localeCompare(String(b.title), "de") || String(a.artist).localeCompare(String(b.artist), "de")
+  return Object.values(list.songs).sort(
+    (a, b) =>
+      String(a.title).localeCompare(String(b.title), "de") ||
+      String(a.artist).localeCompare(String(b.artist), "de")
   );
 }
 
@@ -96,12 +107,178 @@ async function loadFromSpotify(playlistInput) {
     const stored = await loadSonglist(catalog.id);
     list = mergeCatalogWithStored(catalog, stored);
     list = await saveSonglist(list);
+    correctionPreview = null;
     setStatus(`„${list.title}“ · ${Object.keys(list.songs).length} Songs (Korrekturen behalten)`);
     paint();
   } catch (err) {
     console.error("[zeitsprung] laden", err);
     setStatus(explainError(err) || err.message, true);
   }
+}
+
+function askExportScope() {
+  return new Promise((resolve) => {
+    const back = el("div", "dialog-back");
+    const dialog = el("div", "dialog");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.append(el("p", "", "Welche Songs exportieren?"));
+    const suspectBtn = el("button", "btn primary", "Nur verdächtige");
+    suspectBtn.type = "button";
+    const allBtn = el("button", "btn", "Alle");
+    allBtn.type = "button";
+    const cancel = el("button", "btn", "Abbrechen");
+    cancel.type = "button";
+    const finish = (value) => {
+      back.remove();
+      resolve(value);
+    };
+    suspectBtn.addEventListener("click", () => finish("suspect"));
+    allBtn.addEventListener("click", () => finish("all"));
+    cancel.addEventListener("click", () => finish(null));
+    back.addEventListener("click", (event) => {
+      if (event.target === back) finish(null);
+    });
+    dialog.append(suspectBtn, allBtn, cancel);
+    back.append(dialog);
+    document.body.append(back);
+    suspectBtn.focus();
+  });
+}
+
+async function exportSongList() {
+  if (!list) return;
+  const scope = await askExportScope();
+  if (!scope) return;
+  const rows = songRows().filter((song) => (scope === "suspect" ? song.suspicious : true));
+  if (!rows.length) {
+    setStatus(scope === "suspect" ? "Keine verdächtigen Songs." : "Keine Songs zum Export.", true);
+    return;
+  }
+  const csv = buildSongCsv(rows);
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const fileName = "zeitsprung-songs.csv";
+  const file = new File([blob], fileName, { type: "text/csv" });
+
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(csv);
+    copied = true;
+  } catch (err) {
+    console.error("[zeitsprung] Zwischenablage", err);
+  }
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.rel = "noopener";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+  let shared = false;
+  try {
+    if (navigator.share) {
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ files: [file], title: "Zeitsprung Songliste", text: list.title || "Songliste" });
+        shared = true;
+      } else {
+        await navigator.share({ title: "Zeitsprung Songliste", text: csv });
+        shared = true;
+      }
+    }
+  } catch (err) {
+    if (err?.name !== "AbortError") console.error("[zeitsprung] Teilen", err);
+  }
+
+  const bits = [`${rows.length} Songs exportiert`];
+  if (copied) bits.push("Zwischenablage");
+  bits.push("Datei");
+  if (shared) bits.push("Teilen");
+  setStatus(bits.join(" · "));
+}
+
+function openCorrectionPreview(raw) {
+  if (!list) {
+    setStatus("Zuerst eine Playlist laden.", true);
+    return;
+  }
+  const parsed = parseYearCorrections(raw, list.songs);
+  correctionPreview = { ...parsed, raw: String(raw || "") };
+  if (!parsed.changes.length && !parsed.unknown.length && !parsed.invalid.length) {
+    setStatus("Keine brauchbaren Zeilen gefunden.", true);
+  } else {
+    setStatus(
+      `Vorschau: ${parsed.changes.length} Änderungen · ${parsed.unknown.length} unbekannte IDs · ${parsed.invalid.length} ungültig`
+    );
+  }
+  paint();
+}
+
+async function applyCorrections() {
+  if (!list || !correctionPreview?.changes?.length) return;
+  for (const change of correctionPreview.changes) {
+    const song = list.songs[change.id];
+    if (!song) continue;
+    song.yearOverride = change.to;
+    song.suspicious = false;
+  }
+  const count = correctionPreview.changes.length;
+  correctionPreview = null;
+  await persist();
+  setStatus(`${count} Korrekturen übernommen und gespeichert.`);
+}
+
+function paintCorrectionPreview(parent) {
+  if (!correctionPreview) return;
+  const box = el("div", "zs-correction");
+  box.append(el("h2", "lobby-list-title", "Korrekturen – Vorschau"));
+  if (correctionPreview.changes.length) {
+    const ul = el("ul", "zs-correction-list");
+    for (const change of correctionPreview.changes) {
+      const item = el(
+        "li",
+        "",
+        `${change.title}: ${change.from || "–"} → ${change.to}`
+      );
+      ul.append(item);
+    }
+    box.append(ul);
+  } else {
+    box.append(el("p", "lead", "Keine gültigen Änderungen."));
+  }
+  if (correctionPreview.unknown.length) {
+    box.append(el("p", "note is-bad", "Unbekannte IDs (nicht in der Liste):"));
+    const ul = el("ul", "zs-correction-list is-bad");
+    for (const row of correctionPreview.unknown) {
+      ul.append(el("li", "", `${row.id} → ${row.year}`));
+    }
+    box.append(ul);
+  }
+  if (correctionPreview.invalid.length) {
+    box.append(el("p", "note is-bad", "Ungültige Zeilen:"));
+    const ul = el("ul", "zs-correction-list is-bad");
+    for (const row of correctionPreview.invalid) {
+      ul.append(el("li", "", `Zeile ${row.line}: ${row.id || "–"} · ${row.reason} (${row.year ?? ""})`));
+    }
+    box.append(ul);
+  }
+  const actions = el("div", "btn-row");
+  const apply = el("button", "btn primary", "Übernehmen");
+  apply.type = "button";
+  apply.disabled = !correctionPreview.changes.length || saving;
+  apply.addEventListener("click", () => applyCorrections());
+  const cancel = el("button", "btn", "Abbrechen");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => {
+    correctionPreview = null;
+    paint();
+  });
+  actions.append(apply, cancel);
+  box.append(actions);
+  parent.append(box);
 }
 
 function paintList(container) {
@@ -117,7 +294,10 @@ function paintList(container) {
   }
   const table = el("div", "zs-song-list");
   for (const song of rows) {
-    const row = el("article", `zs-song${song.suspicious ? " is-suspect" : ""}${song.excluded ? " is-excluded" : ""}`);
+    const row = el(
+      "article",
+      `zs-song${song.suspicious ? " is-suspect" : ""}${song.excluded ? " is-excluded" : ""}`
+    );
     const top = el("div", "zs-song-top");
     top.append(el("strong", "zs-song-title", song.title));
     top.append(el("span", "zs-song-artist", song.artist || "–"));
@@ -138,10 +318,9 @@ function paintList(container) {
       const next = Math.floor(Number(yearInput.value) || 0);
       if (!next) {
         song.yearOverride = null;
-      } else if (next === song.year) {
-        song.yearOverride = null;
       } else {
         song.yearOverride = next;
+        song.suspicious = false;
       }
       persist();
     });
@@ -151,7 +330,7 @@ function paintList(container) {
     }
     tools.append(yearLabel);
 
-    const exclude = el("button", song.excluded ? "btn" : "btn", song.excluded ? "Wieder aufnehmen" : "Ausschließen");
+    const exclude = el("button", "btn", song.excluded ? "Wieder aufnehmen" : "Ausschließen");
     exclude.type = "button";
     exclude.addEventListener("click", () => {
       song.excluded = !song.excluded;
@@ -180,6 +359,7 @@ function paint() {
   filterQuery = keepQuery;
   const keepSuspect = app.querySelector("[name=only-suspect]")?.checked ?? onlySuspicious;
   onlySuspicious = keepSuspect;
+  const keepImport = app.querySelector("[name=corrections]")?.value || correctionPreview?.raw || "";
 
   app.innerHTML = "";
   const screen = el("div", "screen zs-page");
@@ -212,9 +392,7 @@ function paint() {
   body.append(status);
 
   if (!isConfigured()) {
-    body.append(
-      el("p", "note is-bad", "Spotify Client ID fehlt in shared/spotify-config.js.")
-    );
+    body.append(el("p", "note is-bad", "Spotify Client ID fehlt in shared/spotify-config.js."));
   }
 
   if (!session) {
@@ -238,6 +416,7 @@ function paint() {
       logout();
       session = null;
       list = null;
+      correctionPreview = null;
       paint();
     });
     body.append(out);
@@ -286,6 +465,48 @@ function paint() {
       suspectRow.append(suspect, el("span", "", "Nur verdächtige Jahre"));
       filters.append(suspectRow);
       body.append(filters);
+
+      const io = el("div", "btn-row zs-io");
+      const exportBtn = el("button", "btn", "Liste exportieren");
+      exportBtn.type = "button";
+      exportBtn.addEventListener("click", () => exportSongList());
+      io.append(exportBtn);
+      body.append(io);
+
+      body.append(el("h2", "lobby-list-title", "Korrekturen einspielen"));
+      const importLabel = el("label", "lobby-field", "Text einfügen (ID;…;Jahr)");
+      const importArea = document.createElement("textarea");
+      importArea.className = "text-input zs-import-area";
+      importArea.name = "corrections";
+      importArea.rows = 5;
+      importArea.placeholder = "ID;Titel;Interpret;Album;Jahr;Verdächtig";
+      importArea.value = keepImport;
+      importLabel.append(importArea);
+      body.append(importLabel);
+      const fileLabel = el("label", "lobby-field", "Oder Datei wählen");
+      const fileInput = document.createElement("input");
+      fileInput.type = "file";
+      fileInput.accept = ".csv,text/csv,text/plain";
+      fileInput.addEventListener("change", async () => {
+        const file = fileInput.files?.[0];
+        if (!file) return;
+        try {
+          const text = await file.text();
+          importArea.value = text;
+          openCorrectionPreview(text);
+        } catch (err) {
+          console.error("[zeitsprung] Datei", err);
+          setStatus("Datei konnte nicht gelesen werden.", true);
+        }
+      });
+      fileLabel.append(fileInput);
+      body.append(fileLabel);
+      const previewBtn = el("button", "btn", "Korrekturen einspielen");
+      previewBtn.type = "button";
+      previewBtn.addEventListener("click", () => openCorrectionPreview(importArea.value));
+      body.append(previewBtn);
+
+      paintCorrectionPreview(body);
 
       const listBox = el("div");
       listBox.setAttribute("data-song-list", "1");

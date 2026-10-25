@@ -83,16 +83,18 @@ export function mergeCatalogWithStored(catalog, stored) {
   const songs = {};
   for (const track of catalog.tracks || []) {
     const old = prev[track.id];
+    const yearOverride = old?.yearOverride == null ? null : old.yearOverride;
     songs[track.id] = {
       id: track.id,
       uri: track.uri,
       title: track.title,
       artist: track.artist,
       year: track.year,
-      yearOverride: old?.yearOverride == null ? null : old.yearOverride,
+      yearOverride,
       album: track.album,
       albumType: track.albumType,
-      suspicious: track.suspicious === true,
+      // Korrektur behalten: mit yearOverride nicht wieder als verdächtig markieren
+      suspicious: yearOverride != null ? false : track.suspicious === true,
       excluded: old?.excluded === true,
     };
   }
