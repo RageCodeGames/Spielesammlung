@@ -8,6 +8,7 @@ import {
   parsePlaylistInput,
   redirectUri,
 } from "../../shared/spotify.js";
+import { readScroll, writeScroll } from "../../shared/scroll.js";
 import { buildSongCsv, parseYearCorrections } from "./csv.js";
 import { DEFAULT_VARIANT_NAME } from "./rules.js";
 import { effectiveYear, isSuspiciousAlbum } from "./suspicious.js";
@@ -92,19 +93,20 @@ function visibleSongs() {
   });
 }
 
-async function persist() {
+async function persist(opts = {}) {
   if (!list) return;
   saving = true;
-  paint();
+  paint({ keepScroll: opts.keepScroll !== false });
   try {
     list = await saveSonglist(list);
+    variants = await listSonglists().catch(() => variants);
     setStatus(`Gespeichert · ${Object.keys(list.songs).length} Songs`);
   } catch (err) {
     console.error("[zeitsprung] speichern", err);
     setStatus(explainError(err) || err.message, true);
   } finally {
     saving = false;
-    paint();
+    paint({ keepScroll: opts.keepScroll !== false });
   }
 }
 
@@ -126,8 +128,9 @@ async function loadFromSpotify(playlistInput) {
     if (!list.name) list.name = DEFAULT_VARIANT_NAME;
     list = await saveSonglist(list);
     correctionPreview = null;
-    setStatus(`„${list.title}“ · ${Object.keys(list.songs).length} Songs (Korrekturen behalten)`);
-    paint();
+    variants = await listSonglists().catch(() => variants);
+    setStatus(`„${list.name || list.title}“ · ${Object.keys(list.songs).length} Songs (Korrekturen behalten)`);
+    paint({ fromSelection: true, keepScroll: true });
   } catch (err) {
     console.error("[zeitsprung] laden", err);
     setStatus(explainError(err) || err.message, true);
@@ -280,43 +283,84 @@ async function downloadCsv(csv, fileName, shareTitle) {
   return { copied, shared };
 }
 
-async function exportSongList() {
-  const scope = await askExportScope();
-  if (!scope) return;
-
-  let rows;
-  let withVariant = false;
-  let fileName = "zeitsprung-songs.csv";
-  if (scope === "all-variants") {
-    setStatus("Lade alle Varianten …");
-    try {
-      rows = await collectAllVariantSongs(false);
-      withVariant = true;
-      fileName = "zeitsprung-alle-varianten.csv";
-    } catch (err) {
-      setStatus(explainError(err) || err.message, true);
-      return;
-    }
-  } else {
-    if (!list) {
-      setStatus("Zuerst eine Variante laden.", true);
-      return;
-    }
-    rows = songRows().filter((song) => (scope === "suspect" ? song.suspicious : true));
-  }
-
+async function finishExport(rows, { withVariant = false, fileName = "zeitsprung-songs.csv", label = "" } = {}) {
   if (!rows.length) {
-    setStatus(scope === "suspect" ? "Keine verdächtigen Songs." : "Keine Songs zum Export.", true);
+    setStatus("Keine Songs zum Export.", true);
     return;
   }
   const csv = buildSongCsv(rows, { withVariant });
-  const { copied, shared } = await downloadCsv(csv, fileName, list?.title || "Zeitsprung Songliste");
+  const { copied, shared } = await downloadCsv(
+    csv,
+    fileName,
+    label || list?.name || list?.title || "Zeitsprung Songliste"
+  );
   const bits = [`${rows.length} Songs exportiert`];
   if (withVariant) bits.push("alle Varianten");
   if (copied) bits.push("Zwischenablage");
   bits.push("Datei");
   if (shared) bits.push("Teilen");
   setStatus(bits.join(" · "));
+}
+
+async function exportAllVariants() {
+  setStatus("Lade alle Varianten …");
+  try {
+    const rows = await collectAllVariantSongs(false);
+    await finishExport(rows, {
+      withVariant: true,
+      fileName: "zeitsprung-alle-varianten.csv",
+      label: "Zeitsprung alle Varianten",
+    });
+  } catch (err) {
+    setStatus(explainError(err) || err.message, true);
+  }
+}
+
+async function exportSongList() {
+  const scope = await askExportScope();
+  if (!scope) return;
+  if (scope === "all-variants") {
+    await exportAllVariants();
+    return;
+  }
+  if (!list) {
+    setStatus("Zuerst eine Variante laden.", true);
+    return;
+  }
+  const rows = songRows().filter((song) => (scope === "suspect" ? song.suspicious : true));
+  if (!rows.length) {
+    setStatus(scope === "suspect" ? "Keine verdächtigen Songs." : "Keine Songs zum Export.", true);
+    return;
+  }
+  await finishExport(rows, {
+    fileName: "zeitsprung-songs.csv",
+    label: list.name || list.title || "Songliste",
+  });
+}
+
+async function selectVariant(playlistId) {
+  try {
+    const stored = await loadSonglist(playlistId);
+    if (!stored) {
+      setStatus("Variante nicht gefunden.", true);
+      return;
+    }
+    list = stored;
+    if (!String(list.name || "").trim()) list.name = DEFAULT_VARIANT_NAME;
+    filterQuery = "";
+    onlySuspicious = false;
+    correctionPreview = null;
+    setStatus(`„${list.name}“ geladen`);
+    paint({ fromSelection: true, scrollToSongs: true });
+    if (!String(stored.name || "").trim()) await persist({ keepScroll: true });
+  } catch (err) {
+    setStatus(explainError(err) || err.message, true);
+  }
+}
+
+function variantLabel(row = list) {
+  if (!row) return "Variante";
+  return String(row.name || row.title || "Variante").trim() || "Variante";
 }
 
 async function openCorrectionPreview(raw) {
@@ -342,14 +386,14 @@ async function openCorrectionPreview(raw) {
       `Vorschau: ${parsed.changes.length} Änderungen in allen Varianten · ${parsed.unknown.length} unbekannte IDs · ${parsed.invalid.length} ungültig`
     );
   }
-  paint();
+  paint({ keepScroll: true });
 }
 
 async function applyCorrections() {
   if (!correctionPreview?.changes?.length) return;
   const changes = correctionPreview.changes;
   saving = true;
-  paint();
+  paint({ keepScroll: true });
   try {
     const rows = variants.length ? variants : await listSonglists();
     let listsTouched = 0;
@@ -384,17 +428,17 @@ async function applyCorrections() {
     setStatus(explainError(err) || err.message, true);
   } finally {
     saving = false;
-    paint();
+    paint({ keepScroll: true, fromSelection: true });
   }
 }
 
 async function removeCurrentVariant() {
   if (!list?.playlistId) return;
-  const name = list.name || list.title || "diese Variante";
+  const name = variantLabel();
   const ok = await askConfirm(`Variante „${name}“ wirklich löschen? Das lässt sich nicht rückgängig machen.`);
   if (!ok) return;
   saving = true;
-  paint();
+  paint({ keepScroll: true });
   try {
     const id = list.playlistId;
     await deleteSonglist(id);
@@ -407,7 +451,7 @@ async function removeCurrentVariant() {
     setStatus(explainError(err) || err.message, true);
   } finally {
     saving = false;
-    paint();
+    paint({ keepScroll: true });
   }
 }
 
@@ -454,7 +498,7 @@ function paintCorrectionPreview(parent) {
   cancel.type = "button";
   cancel.addEventListener("click", () => {
     correctionPreview = null;
-    paint();
+    paint({ keepScroll: true });
   });
   actions.append(apply, cancel);
   box.append(actions);
@@ -533,15 +577,35 @@ function paintList(container) {
   );
 }
 
-function paint() {
-  const keepPlaylist = app.querySelector("[name=playlist]")?.value || "";
+/**
+ * @param {{ fromSelection?: boolean, scrollToSongs?: boolean, keepScroll?: boolean }} [opts]
+ */
+function paint(opts = {}) {
+  const fromSelection = opts.fromSelection === true;
+  const keepScroll = opts.keepScroll !== false && !opts.scrollToSongs;
+  const scrollTop = keepScroll ? readScroll(app) : 0;
+
+  const domPlaylistId = app.querySelector("[data-active-playlist]")?.value || "";
+  const domPlaylist = app.querySelector("[name=playlist]")?.value || "";
+  const domName = app.querySelector("[name=variant-name]")?.value || "";
   const keepQuery = app.querySelector("[name=search]")?.value ?? filterQuery;
   filterQuery = keepQuery;
   const keepSuspect = app.querySelector("[name=only-suspect]")?.checked ?? onlySuspicious;
   onlySuspicious = keepSuspect;
   const keepImport = app.querySelector("[name=corrections]")?.value || correctionPreview?.raw || "";
-  const keepName =
-    app.querySelector("[name=variant-name]")?.value || list?.name || DEFAULT_VARIANT_NAME;
+
+  /* Bei Variantenwechsel Felder aus der Liste, nicht aus dem alten DOM */
+  const sameList = Boolean(list && domPlaylistId && domPlaylistId === list.playlistId);
+  const playlistValue = list
+    ? fromSelection || !sameList
+      ? `spotify:playlist:${list.playlistId}`
+      : domPlaylist || `spotify:playlist:${list.playlistId}`
+    : domPlaylist;
+  const nameValue = list
+    ? fromSelection || !sameList
+      ? list.name || DEFAULT_VARIANT_NAME
+      : domName || list.name || DEFAULT_VARIANT_NAME
+    : domName;
 
   app.innerHTML = "";
   const screen = el("div", "screen zs-page");
@@ -599,71 +663,76 @@ function paint() {
       session = null;
       list = null;
       correctionPreview = null;
-      paint();
+      paint({ keepScroll: false });
     });
     body.append(out);
+
+    const activeId = el("input");
+    activeId.type = "hidden";
+    activeId.setAttribute("data-active-playlist", "1");
+    activeId.value = list?.playlistId || "";
+    body.append(activeId);
 
     const plLabel = el("label", "lobby-field", "Playlist-Link");
     const plInput = el("input", "text-input");
     plInput.name = "playlist";
     plInput.placeholder = "https://open.spotify.com/playlist/…";
-    plInput.value = keepPlaylist || (list ? `spotify:playlist:${list.playlistId}` : "");
+    plInput.value = playlistValue;
     plLabel.append(plInput);
     body.append(plLabel);
 
-    const loadBtn = el("button", "btn primary", list ? "Erneut von Spotify laden" : "Songs laden");
+    const loadLabel = list ? `„${variantLabel()}“ erneut von Spotify laden` : "Songs laden";
+    const loadBtn = el("button", "btn primary", loadLabel);
     loadBtn.type = "button";
     loadBtn.disabled = saving;
     loadBtn.addEventListener("click", async () => {
       loadBtn.disabled = true;
       await loadFromSpotify(plInput.value);
       variants = await listSonglists().catch(() => variants);
-      paint();
+      paint({ fromSelection: true, keepScroll: true });
       loadBtn.disabled = false;
     });
     body.append(loadBtn);
 
     if (variants.length) {
       body.append(el("h2", "lobby-list-title", "Gespeicherte Varianten"));
+      const variantBox = el("div", "zs-variant-list");
       for (const row of variants) {
-        const open = el("button", "btn", `${row.name} (${row.songCount} Songs)`);
+        const selected = list?.playlistId === row.playlistId;
+        const open = el(
+          "button",
+          selected ? "btn primary zs-variant-btn is-selected" : "btn zs-variant-btn",
+          `${row.name} (${row.songCount} Songs)`
+        );
         open.type = "button";
-        open.addEventListener("click", async () => {
-          try {
-            const stored = await loadSonglist(row.playlistId);
-            if (!stored) {
-              setStatus("Variante nicht gefunden.", true);
-              return;
-            }
-            list = stored;
-            if (!String(stored.name || "").trim()) {
-              list.name = DEFAULT_VARIANT_NAME;
-              await persist();
-            } else {
-              paint();
-            }
-            setStatus(`„${list.name}“ geladen`);
-          } catch (err) {
-            setStatus(explainError(err) || err.message, true);
-          }
-        });
-        body.append(open);
+        open.setAttribute("aria-pressed", selected ? "true" : "false");
+        if (selected) open.setAttribute("aria-current", "true");
+        open.addEventListener("click", () => selectVariant(row.playlistId));
+        variantBox.append(open);
       }
+      body.append(variantBox);
     }
 
     if (list) {
       const nameLabel = el("label", "lobby-field", "Name der Variante");
       const nameInput = el("input", "text-input");
       nameInput.name = "variant-name";
-      nameInput.value = keepName;
+      nameInput.value = nameValue;
       nameInput.addEventListener("change", () => {
+        if (!list) return;
         list.name = nameInput.value.trim() || DEFAULT_VARIANT_NAME;
-        persist();
+        persist({ keepScroll: true });
       });
       nameLabel.append(nameInput);
       body.append(nameLabel);
 
-      body.append(el("h2", "lobby-list-title", list.title || "Songliste"));
+      const heading = el("h2", "lobby-list-title", variantLabel());
+      heading.setAttribute("data-variant-heading", "1");
+      body.append(heading);
+      if (list.title && list.title !== list.name) {
+        body.append(el("p", "note", list.title));
+      }
+
       const filters = el("div", "zs-filters");
       const searchLabel = el("label", "lobby-field", "Suche");
       const search = el("input", "text-input");
@@ -692,13 +761,21 @@ function paint() {
       const io = el("div", "btn-row zs-io");
       const exportBtn = el("button", "btn", "Liste exportieren");
       exportBtn.type = "button";
+      exportBtn.title = `Nur „${variantLabel()}“`;
       exportBtn.addEventListener("click", () => exportSongList());
-      const deleteBtn = el("button", "btn", "Variante löschen");
+      const exportAllBtn = el("button", "btn primary", "Alle Varianten");
+      exportAllBtn.type = "button";
+      exportAllBtn.title = "Eine Datei mit allen Songs aller Varianten (Spalte Variante)";
+      exportAllBtn.addEventListener("click", () => exportAllVariants());
+      const deleteBtn = el("button", "btn", `„${variantLabel()}“ löschen`);
       deleteBtn.type = "button";
       deleteBtn.disabled = saving;
       deleteBtn.addEventListener("click", () => removeCurrentVariant());
-      io.append(exportBtn, deleteBtn);
+      io.append(exportBtn, exportAllBtn, deleteBtn);
       body.append(io);
+      body.append(
+        el("p", "note", "„Alle Varianten“: eine CSV mit erster Spalte Variante, doppelte Songs nur einmal.")
+      );
 
       body.append(el("h2", "lobby-list-title", "Korrekturen einspielen"));
       body.append(
@@ -753,4 +830,15 @@ function paint() {
   back.type = "button";
   back.addEventListener("click", () => onBack());
   dock.append(back);
+
+  if (opts.scrollToSongs) {
+    writeScroll(app, scrollTop);
+    requestAnimationFrame(() => {
+      const target =
+        app.querySelector("[data-variant-heading]") || app.querySelector("[data-song-list]");
+      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  } else {
+    writeScroll(app, scrollTop);
+  }
 }
