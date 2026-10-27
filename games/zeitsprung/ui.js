@@ -47,6 +47,13 @@ import {
   tapCard,
 } from "./logic.js";
 import { bindTimelineDrag } from "./drag.js";
+import {
+  bindCardPeek,
+  faceDownCard,
+  faceUpCard,
+  hideCardPeek,
+  revealFlipCard,
+} from "./cards.js";
 import { flipPlayEnabled, formatSensorLine, setFlipPlayEnabled, watchFaceDown } from "./flip.js";
 import {
   acceptCueOnArrival,
@@ -118,6 +125,8 @@ let sensorNoData = false;
 let lastHandledCue = "";
 let lastAimedGap = null;
 let dragStop = null;
+let peekStop = null;
+let revealFlipKey = "";
 /** Cue-ID, für die der Umdreh-Hinweis schon weg kann (Song lief). */
 let flipHintDoneCue = "";
 let lastUnavailableCue = "";
@@ -1275,7 +1284,7 @@ function timelineRow(cards, { ownerId, interactive, highlightGap, aimGap, locked
   };
   addGap(0);
   list.forEach((card, i) => {
-    wrap.append(cardNode(card));
+    wrap.append(faceUpCard(card));
     addGap(i + 1);
   });
   box.append(wrap);
@@ -1287,21 +1296,8 @@ function readCards(cards) {
   return Array.isArray(cards) ? cards : Object.values(cards || {});
 }
 
-function cardNode(card) {
-  const node = el("article", "zs-card");
-  node.append(el("strong", "zs-card-year", String(card.year || "")));
-  node.append(el("span", "zs-card-title", card.title || ""));
-  node.append(el("span", "zs-card-artist", card.artist || ""));
-  return node;
-}
-
 function vinylButton() {
-  const btn = el("button", "zs-face-down");
-  btn.type = "button";
-  btn.setAttribute("aria-label", "Songkarte");
-  btn.setAttribute("data-drag-label", "?");
-  btn.append(el("strong", "zs-face-down-q", "?"));
-  return btn;
+  return faceDownCard({ asButton: true });
 }
 
 function flipHintNode() {
@@ -1393,6 +1389,9 @@ function renderPlayView() {
   const scrollWork = app.querySelector("[data-work-tl]")?.scrollLeft || 0;
   dragStop?.();
   dragStop = null;
+  peekStop?.();
+  peekStop = null;
+  hideCardPeek();
 
   muteControl?.destroy();
   const view = el("section", "screen zs-play");
@@ -1447,8 +1446,15 @@ function renderPlayView() {
     }
   } else if (phase === "reveal") {
     const r = state.reveal || {};
-    center.append(el("p", "zs-reveal-title", r.title || ""));
-    center.append(el("p", "zs-reveal-meta", `${r.artist || ""} · ${r.year || ""}`));
+    const flipKey = `${r.title || ""}|${r.year || ""}|${r.result || ""}`;
+    const animate = flipKey !== revealFlipKey;
+    revealFlipKey = flipKey;
+    center.append(
+      revealFlipCard(
+        { title: r.title, artist: r.artist, year: r.year },
+        { animate }
+      )
+    );
     const how =
       r.result === "keep"
         ? `${active} behält die Karte.`
@@ -1536,6 +1542,8 @@ function renderPlayView() {
   upper.append(side, center, actions);
 
   const lower = el("div", "zs-lower");
+  if (phase !== "reveal") revealFlipKey = "";
+
   if (phase === "end") {
     const strip = el("div", "zs-end-strip");
     for (const player of state.players) {
@@ -1578,6 +1586,7 @@ function renderPlayView() {
   board.append(upper, lower);
   view.append(board);
   app.replaceChildren(view);
+  peekStop = bindCardPeek(lower);
   const myTl = app.querySelector("[data-my-tl]");
   if (myTl) myTl.scrollLeft = scrollMine;
   const workTl = app.querySelector("[data-work-tl]");
@@ -1597,12 +1606,17 @@ function renderPlayView() {
   }
 }
 
-function isLayoutPreview() {
+function layoutMode() {
   try {
-    return new URL(location.href).searchParams.get("layout") === "1";
+    return new URL(location.href).searchParams.get("layout") || "";
   } catch {
-    return false;
+    return "";
   }
+}
+
+function isLayoutPreview() {
+  const mode = layoutMode();
+  return mode === "1" || mode === "reveal";
 }
 
 function renderLayoutPreview() {
@@ -1615,8 +1629,9 @@ function renderLayoutPreview() {
     },
   };
   onlineApi = { isHost: () => true, getPlayerId: () => "a" };
+  const reveal = layoutMode() === "reveal";
   state = {
-    phase: "listen",
+    phase: reveal ? "reveal" : "listen",
     players: [
       { id: "a", name: "Anna" },
       { id: "b", name: "Ben" },
@@ -1625,12 +1640,30 @@ function renderLayoutPreview() {
     tokens: { a: 2, b: 1, c: 1 },
     activeId: "a",
     timelines: {
-      a: [{ id: "1", title: "Highway", artist: "Band", year: 1979 }],
-      b: [{ id: "2", title: "Night", artist: "Duo", year: 1984 }],
-      c: [{ id: "3", title: "River", artist: "Trio", year: 1991 }],
+      a: [
+        { id: "1", title: "Highway to Nowhere - 2015 Remaster", artist: "The Copper Wires", year: 1958 },
+        { id: "2", title: "Night Drive (feat. Luna)", artist: "Amber & The Dials", year: 1967 },
+        { id: "3", title: "River Song - Radio Edit", artist: "Oak Street Choir", year: 1979 },
+        { id: "4", title: "Neon Parade - Remastered 2011", artist: "Violet Static", year: 1986 },
+        { id: "5", title: "Paper Planes - Live at Harbour Hall", artist: "Green Lantern Trio", year: 1994 },
+        { id: "6", title: "Glasshouse - Single Version", artist: "Blue Harbor", year: 2007 },
+        { id: "9", title: "Midnight Atlas (feat. Nova)", artist: "Copper Satellite", year: 2014 },
+        { id: "10", title: "Soft Alarm - Remastered 2022", artist: "Ivory Circuit", year: 2021 },
+      ],
+      b: [{ id: "7", title: "Night", artist: "Duo", year: 1984 }],
+      c: [{ id: "8", title: "River", artist: "Trio", year: 1991 }],
     },
     cue: { cueId: "preview", trackUri: "spotify:track:x", playlistUri: "spotify:playlist:y" },
     played: true,
+    reveal: reveal
+      ? {
+          title: "Highway to Nowhere - 2015 Remaster",
+          artist: "The Copper Wires",
+          year: 1958,
+          result: "keep",
+        }
+      : null,
+    winnerId: "a",
   };
   selectedGap = 1;
   renderPlay();

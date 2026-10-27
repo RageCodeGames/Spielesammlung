@@ -3,6 +3,8 @@
  * touch-action: none, kein Seiten-Scroll.
  */
 
+import { fillDragGhost } from "./cards.js";
+
 const EDGE = 48;
 const SCROLL_STEP = 28;
 
@@ -62,8 +64,8 @@ export function bindTimelineDrag({ source, timeline, lockedGap, onHover, onDrop,
 
   const moveGhost = (x, y) => {
     if (!ghost) return;
-    const w = ghost.offsetWidth || 115;
-    const h = ghost.offsetHeight || 67;
+    const w = ghost.offsetWidth || 90;
+    const h = ghost.offsetHeight || 110;
     ghost.style.transform = `translate(${x - w / 2}px, ${y - h / 2}px)`;
   };
 
@@ -100,9 +102,12 @@ export function bindTimelineDrag({ source, timeline, lockedGap, onHover, onDrop,
     source.setPointerCapture(pointerId);
     document.body.classList.add("zs-dragging");
     ghost = document.createElement("div");
-    ghost.className = "zs-drag-ghost";
-    ghost.setAttribute("aria-hidden", "true");
-    ghost.textContent = source.getAttribute("data-drag-label") || "?";
+    if (source.classList.contains("zs-song-back")) fillDragGhost(ghost);
+    else {
+      ghost.className = "zs-drag-ghost";
+      ghost.setAttribute("aria-hidden", "true");
+      ghost.textContent = source.getAttribute("data-drag-label") || "?";
+    }
     document.body.append(ghost);
     moveGhost(event.clientX, event.clientY);
   };
