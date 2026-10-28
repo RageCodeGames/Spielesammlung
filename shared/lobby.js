@@ -1,3 +1,4 @@
+import { CACHE_NAME } from "./cache-version.js";
 import { makeQrSvg } from "./qrcode.js";
 import {
   OFFLINE_MESSAGE,
@@ -108,7 +109,7 @@ export function confirmRoomExit(isHost) {
 }
 
 /** Dezentes ⋯-Menü zum Schließen/Verlassen während des Spiels. */
-export function appendRoomMenu(parent, { isHost, onExit, extra = [] }) {
+export function appendRoomMenu(parent, { isHost, onExit, extra = [], version } = {}) {
   if (!parent) return;
   const box = el("div", "room-menu");
   const toggle = el("button", "btn room-menu-btn", "⋯");
@@ -155,6 +156,12 @@ export function appendRoomMenu(parent, { isHost, onExit, extra = [] }) {
       item.onClick?.();
     });
     pop.append(more);
+  }
+  const verLabel = version || CACHE_NAME;
+  if (verLabel) {
+    const ver = el("p", "room-menu-ver", String(verLabel));
+    ver.setAttribute("aria-hidden", "true");
+    pop.append(ver);
   }
   box.append(toggle, pop);
   parent.append(box);

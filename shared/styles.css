@@ -790,6 +790,17 @@ a.back.is-pressed {
   width: 100%;
 }
 
+.room-menu-ver {
+  margin: 0.35rem 0.2rem 0.1rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  opacity: 0.55;
+  text-align: center;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 body.spotify-test hr.spotify-rule {
   border: 0;
   border-top: 1px solid rgba(244, 239, 230, 0.12);

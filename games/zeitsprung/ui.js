@@ -351,7 +351,7 @@ function renderBoot() {
   );
   if (bootError) body.append(el("p", "note is-bad", bootError));
   if (isDev()) body.append(el("p", "note", "Testmodus: Testspieler sind stumm und spielen mit."));
-  const play = el("button", "btn primary", "Raum öffnen");
+  const play = el("button", "btn primary", "Online spielen");
   play.type = "button";
   play.addEventListener("click", () => enterLobby());
   const lists = el("button", "btn", "Songliste vorbereiten");
@@ -1396,7 +1396,7 @@ function renderPlayView() {
   muteControl?.destroy();
   const view = el("section", "screen zs-play");
   const topbar = el("div", "zs-bar");
-  if (lobbyTools) {
+  if (lobbyTools?.appendRoomMenu) {
     lobbyTools.appendRoomMenu(topbar, {
       isHost: iAmHost(),
       onExit: askLeaveRoom,
@@ -1619,15 +1619,9 @@ function isLayoutPreview() {
   return mode === "1" || mode === "reveal";
 }
 
-function renderLayoutPreview() {
+async function renderLayoutPreview() {
   orientation.setPreferred("landscape");
-  lobbyTools = {
-    appendRoomMenu(parent) {
-      const btn = el("button", "btn room-menu-btn", "⋯");
-      btn.type = "button";
-      parent.append(btn);
-    },
-  };
+  lobbyTools = await import("../../shared/lobby.js");
   onlineApi = { isHost: () => true, getPlayerId: () => "a" };
   const reveal = layoutMode() === "reveal";
   state = {

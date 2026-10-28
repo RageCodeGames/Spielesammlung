@@ -108,10 +108,10 @@ function decoQrSvg() {
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("shape-rendering", "crispEdges");
   svg.classList.add("zs-qr");
-  /* Weiß/schwarz, deckend – kein Braun/Grau, keine Transparenz */
+  /* Reines Weiß/Schwarz, deckend – Android darf nichts abdunkeln */
   svg.innerHTML =
     `<rect width="${size}" height="${size}" rx="4" fill="#ffffff"/>` +
-    `<g fill="#111111" shape-rendering="crispEdges">${rects}</g>`;
+    `<g fill="#000000" shape-rendering="crispEdges">${rects}</g>`;
   return svg;
 }
 

@@ -8,7 +8,8 @@
  * skipWaiting läuft nicht von selbst – erst, wenn das Banner angetippt wird.
  */
 
-const CACHE_NAME = "kajuete-v55";
+/* Parallel zu shared/cache-version.js halten. */
+const CACHE_NAME = "kajuete-v56";
 
 const PRECACHE = [
   "./",
@@ -22,6 +23,7 @@ const PRECACHE = [
   "./shared/scroll.js",
   "./shared/wakelock.js",
   "./shared/update.js",
+  "./shared/cache-version.js",
   "./shared/firebase-config.js",
   "./shared/online.js",
   "./shared/lobby.js",
