@@ -2,6 +2,7 @@ import { isMuted, mountMuteButton, setMuted } from "../../shared/mute-button.js"
 import { mountOrientation, preferredForPlayPhase } from "../../shared/orientation.js";
 import { get, set } from "../../shared/storage.js";
 import { requestWakeLock, releaseWakeLock } from "../../shared/wakelock.js";
+import { exitPlayFullscreen, requestPlayFullscreen } from "../../shared/fullscreen.js";
 import { initUpdates } from "../../shared/update.js";
 import {
   completeLoginIfRedirected,
@@ -263,6 +264,7 @@ async function leaveOnline() {
   }
   clearSubs();
   releaseWakeLock();
+  await exitPlayFullscreen();
   try {
     await onlineApi?.leaveRoom?.();
   } catch (err) {
@@ -731,6 +733,7 @@ async function enterLobby() {
         lobbyHandle = null;
         entering = false;
         state = null;
+        exitPlayFullscreen();
         syncOrientation();
         renderBoot();
       },
@@ -738,6 +741,7 @@ async function enterLobby() {
   } catch (err) {
     entering = false;
     state = null;
+    exitPlayFullscreen();
     syncOrientation();
     reportError("Lobby", err);
     renderBoot();
@@ -754,6 +758,8 @@ function beginPlay(room) {
     if (state?.phase === "listen" && state.cue) pendingCue = state.cue;
     syncOrientation();
     requestWakeLock();
+    /* Host: Geste von „Spiel starten“; Gäste: späterer erster Tipp */
+    requestPlayFullscreen();
     clearSubs();
     unsubRoom = onlineApi.onRoomChange((next) => {
       if (leavingUi) return;
@@ -1604,6 +1610,14 @@ function renderPlayView() {
 
   board.append(upper, lower);
   view.append(board);
+  /* Gäste / fehlgeschlagener Start: erster Tipp fordert Vollbild an (Android). */
+  view.addEventListener(
+    "pointerdown",
+    () => {
+      requestPlayFullscreen();
+    },
+    { once: true, passive: true }
+  );
   app.replaceChildren(view);
   peekStop = bindCardPeek(lower);
   const myTl = app.querySelector("[data-my-tl]");
