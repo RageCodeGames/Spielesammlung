@@ -9,7 +9,7 @@
  */
 
 /* Parallel zu shared/cache-version.js halten. */
-const CACHE_NAME = "kajuete-v56";
+const CACHE_NAME = "kajuete-v57";
 
 const PRECACHE = [
   "./",

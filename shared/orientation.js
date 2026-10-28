@@ -7,7 +7,9 @@
  * `preferredForPlayPhase` / `setPreferred`, nicht pro Bildschirmseite.
  *
  * iOS (Safari / Home-Bildschirm): screen.orientation.lock wird nicht
- * unterstützt – nie darauf verlassen. Nur matchMedia / Fenstergröße.
+ * unterstützt – nie darauf verlassen.
+ * Lage aus screen.orientation.type bzw. matchMedia, Fallback
+ * screen.width/height – nie aus innerWidth/innerHeight (Tastatur).
  * Der Hinweis ist rein informativ und verschwindet bei korrekter Lage.
  */
 
@@ -23,12 +25,30 @@ function isIos() {
   return navigator.platform === "MacIntel" && (navigator.maxTouchPoints || 0) > 1;
 }
 
-/** Orientierung nur messen – nie erzwingen. */
+function isInputFocused() {
+  const node = document.activeElement;
+  if (!node || node === document.body || node === document.documentElement) return false;
+  const tag = String(node.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") return true;
+  if (node.isContentEditable) return true;
+  return Boolean(node.closest?.("input, textarea, select, [contenteditable='true']"));
+}
+
+/** Physische Lage – nicht Viewport (Tastatur ändert innerHeight). */
 function isLandscapeNow() {
-  if (window.matchMedia("(orientation: landscape)").matches) return true;
-  if (window.matchMedia("(orientation: portrait)").matches) return false;
-  /* Fallback, falls orientation-Media-Query zögert (ältere WebViews) */
-  return window.innerWidth > window.innerHeight;
+  const type = String(screen.orientation?.type || "");
+  if (type.startsWith("landscape")) return true;
+  if (type.startsWith("portrait")) return false;
+  try {
+    if (window.matchMedia("(orientation: landscape)").matches) return true;
+    if (window.matchMedia("(orientation: portrait)").matches) return false;
+  } catch {
+    /* ältere WebViews */
+  }
+  const w = Number(screen.width) || 0;
+  const h = Number(screen.height) || 0;
+  if (w && h) return w > h;
+  return false;
 }
 
 /**
@@ -79,7 +99,7 @@ export function mountOrientation(preferred = "portrait") {
   const apply = () => {
     if (textNode) textNode.textContent = HINTS[mode];
     document.documentElement.dataset.orientationPrefer = mode;
-    if (!isTouchUi()) {
+    if (!isTouchUi() || isInputFocused()) {
       overlay.hidden = true;
       document.documentElement.classList.remove("orientation-wrong");
       return;
@@ -107,8 +127,9 @@ export function mountOrientation(preferred = "portrait") {
   if (typeof mqlPointer.addEventListener === "function") mqlPointer.addEventListener("change", onChange);
   else if (typeof mqlPointer.addListener === "function") mqlPointer.addListener(onChange);
   window.addEventListener("orientationchange", onChange);
-  window.addEventListener("resize", onChange);
-  window.visualViewport?.addEventListener("resize", onChange);
+  screen.orientation?.addEventListener?.("change", onChange);
+  document.addEventListener("focusin", onChange);
+  document.addEventListener("focusout", onChange);
   apply();
 
   return {
@@ -123,8 +144,9 @@ export function mountOrientation(preferred = "portrait") {
       if (typeof mqlPointer.removeEventListener === "function") mqlPointer.removeEventListener("change", onChange);
       else if (typeof mqlPointer.removeListener === "function") mqlPointer.removeListener(onChange);
       window.removeEventListener("orientationchange", onChange);
-      window.removeEventListener("resize", onChange);
-      window.visualViewport?.removeEventListener("resize", onChange);
+      screen.orientation?.removeEventListener?.("change", onChange);
+      document.removeEventListener("focusin", onChange);
+      document.removeEventListener("focusout", onChange);
       overlay.remove();
       document.documentElement.classList.remove("orientation-wrong");
       delete document.documentElement.dataset.orientationPrefer;

@@ -7,9 +7,12 @@ export function makeQrSvg(text, alt = "QR-Code") {
   const qr = qrcode(0, "M");
   qr.addData(text, "Byte");
   qr.make();
-  return qr.createSvgTag({
-    scalable: true,
-    margin: 2,
-    alt,
-  });
+  return qr
+    .createSvgTag({
+      scalable: true,
+      margin: 2,
+      alt,
+    })
+    .replace(/fill="white"/gi, 'fill="#ffffff"')
+    .replace(/fill="black"/gi, 'fill="#000000"');
 }

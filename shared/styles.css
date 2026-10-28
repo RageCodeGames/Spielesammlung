@@ -43,6 +43,7 @@ body {
 }
 
 html {
+  color-scheme: dark;
   background: var(--bg);
 }
 
@@ -640,13 +641,20 @@ a.back.is-pressed {
   width: min(100%, 14rem);
   padding: 0.7rem;
   border-radius: 1rem;
-  background: #fff;
+  background: #ffffff;
+  color-scheme: only light;
+  forced-color-adjust: none;
+  -webkit-forced-color-adjust: none;
 }
 
 .lobby-qr svg {
   display: block;
   width: 100%;
   height: auto;
+  background: #ffffff;
+  color-scheme: only light;
+  forced-color-adjust: none;
+  -webkit-forced-color-adjust: none;
 }
 
 .lobby-list-title {

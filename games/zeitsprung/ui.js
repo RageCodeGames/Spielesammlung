@@ -46,7 +46,7 @@ import {
   summarizeSettings,
   tapCard,
 } from "./logic.js";
-import { bindTimelineDrag } from "./drag.js";
+import { bindTimelineDrag, clearDragGhosts } from "./drag.js";
 import {
   bindCardPeek,
   faceDownCard,
@@ -922,9 +922,9 @@ async function rematchNow() {
 function armTick() {
   clearInterval(tickTimer);
   tickTimer = 0;
-  if (!iAmHost() || !state || state.phase === "end") return;
+  if (!state || state.phase === "end") return;
   tickTimer = window.setInterval(() => {
-    runHost(hostTick);
+    if (iAmHost()) runHost(hostTick);
     patchTimers();
   }, 250);
 }
@@ -937,11 +937,24 @@ async function hostTick() {
   }
 }
 
+function challengeLeftSec() {
+  const until = Number(state?.challengeUntil) || 0;
+  return Math.max(0, Math.ceil((until - Date.now()) / 1000));
+}
+
+function challengeClockNode() {
+  const t = el("strong", "zs-challenge-clock", `${challengeLeftSec()}s`);
+  t.setAttribute("data-challenge-timer", "1");
+  t.setAttribute("role", "timer");
+  return t;
+}
+
 function patchTimers() {
-  const node = app.querySelector("[data-challenge-timer]");
-  if (!node || (state?.phase !== "challenge" && state?.phase !== "challenge-place")) return;
-  const left = Math.max(0, Math.ceil((state.challengeUntil - Date.now()) / 1000));
-  node.textContent = `${left}s`;
+  if (state?.phase !== "challenge" && state?.phase !== "challenge-place") return;
+  const label = `${challengeLeftSec()}s`;
+  app.querySelectorAll("[data-challenge-timer]").forEach((node) => {
+    node.textContent = label;
+  });
 }
 
 function playlistIdFromCue(cue) {
@@ -1378,6 +1391,12 @@ function renderPlay() {
 }
 
 function renderPlayView() {
+  dragStop?.();
+  dragStop = null;
+  clearDragGhosts();
+  peekStop?.();
+  peekStop = null;
+  hideCardPeek();
   if (state.waitingForHost) {
     app.replaceChildren(el("p", "lead", "Warte auf den Host …"));
     return;
@@ -1387,11 +1406,6 @@ function renderPlayView() {
   const active = playerName(state, state.activeId);
   const scrollMine = app.querySelector("[data-my-tl]")?.scrollLeft || 0;
   const scrollWork = app.querySelector("[data-work-tl]")?.scrollLeft || 0;
-  dragStop?.();
-  dragStop = null;
-  peekStop?.();
-  peekStop = null;
-  hideCardPeek();
 
   muteControl?.destroy();
   const view = el("section", "screen zs-play");
@@ -1474,11 +1488,7 @@ function renderPlayView() {
     }
   } else if (inChallenge) {
     center.append(el("p", "lead", `${active} hat gelegt`));
-    const t = el("strong", "", "");
-    t.setAttribute("data-challenge-timer", "1");
-    const left = Math.max(0, Math.ceil((state.challengeUntil - Date.now()) / 1000));
-    t.textContent = `${left}s`;
-    center.append(t);
+    center.append(challengeClockNode());
     if (phase === "challenge-place") {
       center.append(el("p", "note", `${playerName(state, state.challengerId)} fordert heraus`));
       if (state.challengeGap != null) {
@@ -1491,20 +1501,26 @@ function renderPlayView() {
       (state.tokens[me] || 0) >= CHALLENGE_COST &&
       !state.challengerId
     ) {
+      const wrap = el("div", "zs-challenge-act");
+      wrap.append(challengeClockNode());
       const ch = el("button", "btn primary", "Herausfordern");
       ch.type = "button";
       ch.title = `Herausfordern (${CHALLENGE_COST} Token)`;
       ch.addEventListener("click", () => send("challenge"));
-      actions.append(ch);
+      wrap.append(ch);
+      actions.append(wrap);
     }
     if (phase === "challenge-place" && me === state.challengerId) {
       marker = challengeMarker();
       center.append(marker);
+      const wrap = el("div", "zs-challenge-act");
+      wrap.append(challengeClockNode());
       const go = el("button", "btn primary zs-lock", "Festlegen");
       go.type = "button";
       go.disabled = selectedGap == null || selectedGap === state.proposedGap;
       go.addEventListener("click", confirmPlace);
-      actions.append(go);
+      wrap.append(go);
+      actions.append(wrap);
     }
   } else {
     center.append(el("p", "lead", me === state.activeId ? "Du bist dran" : `${active} ist dran`));
@@ -1561,7 +1577,10 @@ function renderPlayView() {
     lower.append(strip);
   } else if (inChallenge) {
     const chPlace = me === state.challengerId && phase === "challenge-place";
-    lower.append(el("p", "zs-mine-label", `Zeitleiste von ${active}`));
+    const tlLabel = el("p", "zs-mine-label");
+    tlLabel.append(document.createTextNode(`Zeitleiste von ${active} · `));
+    tlLabel.append(challengeClockNode());
+    lower.append(tlLabel);
     lower.append(
       timelineRow(state.timelines[state.activeId], {
         ownerId: state.activeId,

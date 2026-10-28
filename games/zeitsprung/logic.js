@@ -298,6 +298,7 @@ export function migrateState(data) {
   next.clipSec = next.clipSec === 0 ? 0 : 30;
   next.startMode = next.startMode === START_MODE_START ? START_MODE_START : START_MODE_RANDOM;
   if (!next.activeId) next.activeId = next.order[next.turnIndex % next.order.length] || "";
+  next.challengeUntil = Number(next.challengeUntil) || 0;
   return next;
 }
 
