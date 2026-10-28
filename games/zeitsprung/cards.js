@@ -106,8 +106,12 @@ function decoQrSvg() {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
   svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("shape-rendering", "crispEdges");
   svg.classList.add("zs-qr");
-  svg.innerHTML = `<rect width="${size}" height="${size}" rx="6" fill="#241c16"/><g fill="#e6d2a8">${rects}</g>`;
+  /* Weiß/schwarz, deckend – kein Braun/Grau, keine Transparenz */
+  svg.innerHTML =
+    `<rect width="${size}" height="${size}" rx="4" fill="#ffffff"/>` +
+    `<g fill="#111111" shape-rendering="crispEdges">${rects}</g>`;
   return svg;
 }
 

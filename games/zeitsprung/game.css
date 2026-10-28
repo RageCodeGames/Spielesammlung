@@ -1,15 +1,23 @@
+/* Hellere Palette als globale --bg; feste px-Kartenmaße für gleiches
+   Hochformat auf iPhone und Android (rem skaliert je nach Root-Schrift). */
+body.zeitsprung {
+  --bg: #243a58;
+  --bg-glow: #4a6fa3;
+  --surface: #314d70;
+  --surface-hover: #3b5c84;
+  --zs-card-ratio: 1.38;
+  --zs-card-w: 99px;
+  --zs-card-h: calc(var(--zs-card-w) * var(--zs-card-ratio));
+  --zs-edge: 12px;
+}
+
 html:has(body.zeitsprung),
 body.zeitsprung,
 body.zeitsprung #app {
-  background-color: var(--bg);
+  background-color: #243a58;
   background-image:
-    radial-gradient(120% 55% at 50% -10%, var(--bg-glow) 0%, transparent 58%),
-    linear-gradient(var(--bg), var(--bg));
-}
-
-body.zeitsprung {
-  --zs-card-w: 6.2rem;
-  --zs-card-h: 8.5rem;
+    radial-gradient(120% 55% at 50% -10%, #4a6fa3 0%, rgba(74, 111, 163, 0) 58%),
+    linear-gradient(#243a58, #243a58);
 }
 
 body.zeitsprung #app {
@@ -193,14 +201,14 @@ body.zeitsprung .zs-play {
   grid-template-rows: var(--zs-bar) minmax(0, 1fr);
   min-height: 0;
   height: 100%;
-  /* Dynamic Island / Notch: Safe-Area links/rechts im Querformat */
-  padding-top: max(0.15rem, var(--safe-top));
-  padding-left: max(0.55rem, var(--safe-left));
-  padding-right: max(0.55rem, var(--safe-right));
-  padding-bottom: max(0.15rem, var(--safe-bottom));
+  /* Links/rechts: Safe-Area + mind. 12px (Android-Nav, iPhone Notch) */
+  padding-top: max(0.15rem, env(safe-area-inset-top, 0px));
+  padding-right: calc(var(--zs-edge) + env(safe-area-inset-right, 0px));
+  padding-bottom: max(0.15rem, env(safe-area-inset-bottom, 0px));
+  padding-left: calc(var(--zs-edge) + env(safe-area-inset-left, 0px));
   overflow: hidden;
   touch-action: manipulation;
-  background-color: transparent;
+  background-color: #243a58;
   box-sizing: border-box;
 }
 
@@ -387,6 +395,7 @@ body.zeitsprung .zs-tl {
 body.zeitsprung .zs-card,
 body.zeitsprung .zs-song-back {
   flex: 0 0 auto;
+  flex-shrink: 0;
   box-sizing: border-box;
   width: var(--zs-card-w);
   height: var(--zs-card-h);
@@ -394,19 +403,23 @@ body.zeitsprung .zs-song-back {
   min-height: var(--zs-card-h);
   max-width: var(--zs-card-w);
   max-height: var(--zs-card-h);
+  /* Fallback-Seitenverhältnis; Maße kommen aus --zs-card-w/h */
+  aspect-ratio: 100 / 138;
   border-radius: 0.7rem;
   overflow: hidden;
 }
 
 body.zeitsprung .zs-card {
-  padding: 0.32rem 0.36rem 0.38rem;
+  container-type: inline-size;
+  container-name: zs-card;
+  padding: 0.28rem 0.32rem 0.3rem;
   display: grid;
   grid-template-rows: minmax(0, 1.15fr) auto minmax(0, 1.15fr);
   align-items: center;
   justify-items: center;
   text-align: center;
-  color: #f7f1e6;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #fff8ee;
+  border: 1px solid rgba(255, 255, 255, 0.18);
   box-shadow: 0 6px 14px rgba(0, 0, 0, 0.28);
   user-select: none;
   -webkit-user-select: none;
@@ -414,10 +427,18 @@ body.zeitsprung .zs-card {
 }
 
 body.zeitsprung .zs-card-year {
-  font-size: clamp(1.45rem, 0.4 * var(--zs-card-h), 2.2rem);
+  /* An Kartenbreite: 4 Ziffern mit Abstand zum Rand; calc-Fallback ohne cqi */
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 0 3px;
+  font-size: clamp(15px, calc(var(--zs-card-w) * 0.26), 24px);
+  font-size: clamp(15px, 26cqi, 24px);
   font-weight: 800;
-  line-height: 0.95;
-  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  overflow: hidden;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
@@ -439,7 +460,7 @@ body.zeitsprung .zs-card-artist {
 
 body.zeitsprung .zs-card-artist {
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   opacity: 0.94;
   align-self: start;
 }
@@ -450,32 +471,32 @@ body.zeitsprung .zs-card-title {
 }
 
 body.zeitsprung .zs-card-dpre {
-  background: linear-gradient(165deg, #4b5563 0%, #1f2937 100%);
+  background: linear-gradient(165deg, #6b7280 0%, #374151 100%);
 }
 body.zeitsprung .zs-card-d1950 {
-  background: linear-gradient(165deg, #0f766e 0%, #134e4a 100%);
+  background: linear-gradient(165deg, #14b8a6 0%, #0f766e 100%);
 }
 body.zeitsprung .zs-card-d1960 {
-  background: linear-gradient(165deg, #a16207 0%, #713f12 100%);
+  background: linear-gradient(165deg, #f59e0b 0%, #b45309 100%);
 }
 body.zeitsprung .zs-card-d1970 {
-  background: linear-gradient(165deg, #c2410c 0%, #7f1d1d 100%);
+  background: linear-gradient(165deg, #f97316 0%, #c2410c 100%);
 }
 body.zeitsprung .zs-card-d1980 {
-  background: linear-gradient(165deg, #9333ea 0%, #4c1d95 100%);
+  background: linear-gradient(165deg, #a855f7 0%, #7e22ce 100%);
 }
 body.zeitsprung .zs-card-d1990 {
-  background: linear-gradient(165deg, #4d7c0f 0%, #365314 100%);
+  background: linear-gradient(165deg, #84cc16 0%, #4d7c0f 100%);
 }
 body.zeitsprung .zs-card-d2000 {
-  background: linear-gradient(165deg, #1d4ed8 0%, #1e3a8a 100%);
+  background: linear-gradient(165deg, #3b82f6 0%, #1d4ed8 100%);
 }
 body.zeitsprung .zs-card-d2010 {
-  background: linear-gradient(165deg, #9a3412 0%, #7c2d12 100%);
+  background: linear-gradient(165deg, #ea580c 0%, #9a3412 100%);
 }
 body.zeitsprung .zs-card-d2020,
 body.zeitsprung .zs-card-d2030 {
-  background: linear-gradient(165deg, #4338ca 0%, #1e1b4b 100%);
+  background: linear-gradient(165deg, #6366f1 0%, #3730a3 100%);
 }
 
 body.zeitsprung .zs-gap {
@@ -521,10 +542,12 @@ body.zeitsprung .zs-song-back {
   position: relative;
   margin: 0 auto;
   padding: 0.4rem 0.3rem 0.45rem;
-  border: 1px solid rgba(230, 210, 168, 0.28);
-  background:
-    radial-gradient(80% 70% at 50% 42%, #2a231c 0%, #1a1612 72%);
-  color: #e6d2a8;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background-color: #1e293b;
+  background-image:
+    radial-gradient(80% 70% at 50% 42%, #334155 0%, rgba(51, 65, 85, 0) 72%),
+    linear-gradient(#1e293b, #1e293b);
+  color: #f8fafc;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -542,13 +565,12 @@ button.zs-song-back {
 body.zeitsprung .zs-song-back-pattern {
   position: absolute;
   inset: 0;
-  background:
-    radial-gradient(circle at 20% 15%, rgba(230, 210, 168, 0.08), transparent 42%),
-    repeating-linear-gradient(
-      135deg,
-      rgba(230, 210, 168, 0.045) 0 2px,
-      transparent 2px 7px
-    );
+  z-index: 0;
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(248, 250, 252, 0.05) 0 2px,
+    rgba(248, 250, 252, 0) 2px 7px
+  );
   pointer-events: none;
 }
 
@@ -559,6 +581,24 @@ body.zeitsprung .zs-qr {
   flex: 0 1 auto;
   position: relative;
   z-index: 1;
+  display: block;
+  background-color: #ffffff;
+  border-radius: 4px;
+  shape-rendering: crispEdges;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  overflow: hidden;
+  /* Keine Filter/Transparenz – scharfes Schwarz auf Weiß */
+  opacity: 1;
+  filter: none;
+  mix-blend-mode: normal;
+  isolation: isolate;
+  pointer-events: none;
+}
+
+body.zeitsprung .zs-qr rect {
+  shape-rendering: crispEdges;
 }
 
 body.zeitsprung .zs-song-back-mark {
@@ -568,6 +608,7 @@ body.zeitsprung .zs-song-back-mark {
   font-weight: 800;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  color: #f8fafc;
 }
 
 body.zeitsprung .zs-marker {
@@ -785,11 +826,12 @@ body.zeitsprung .zs-flip-hint-icon {
   flex: 0 0 auto;
 }
 
-/* iPhone Querformat inkl. Dynamic Island (z. B. 844×390, 932×430) */
+/* iPhone Querformat inkl. Dynamic Island (z. B. 844×390, 932×430) –
+   Kartenmaße in px, damit iPhone/Android gleiches Hochformat haben. */
 @media (orientation: landscape) and (max-height: 450px) {
   body.zeitsprung .zs-play {
     /* Leiste mind. so hoch wie 48px-Tippfläche */
-    --zs-bar: max(3rem, calc(var(--zs-chrome-hit) + 0.2rem));
+    --zs-bar: max(48px, calc(var(--zs-chrome-hit) + 4px));
     --zs-chrome: 40px;
     --zs-chrome-hit: 48px;
     --zs-btn: 32px;
@@ -797,13 +839,13 @@ body.zeitsprung .zs-flip-hint-icon {
   }
 
   body.zeitsprung {
-    --zs-card-w: 5.5rem;
-    --zs-card-h: 7.2rem;
+    --zs-card-w: 88px;
+    --zs-card-h: calc(var(--zs-card-w) * var(--zs-card-ratio));
   }
 
   body.zeitsprung .zs-upper {
-    padding: 0.2rem 0.2rem 0.08rem;
-    grid-template-columns: minmax(4.8rem, 17%) minmax(0, 1fr) minmax(6.8rem, 26%);
+    padding: 0.2rem 0.15rem 0.08rem;
+    grid-template-columns: minmax(4.5rem, 16%) minmax(0, 1fr) minmax(6.4rem, 25%);
     gap: 0.2rem;
   }
 
@@ -827,7 +869,7 @@ body.zeitsprung .zs-flip-hint-icon {
   }
 
   body.zeitsprung .zs-lower {
-    padding: 0.12rem 0.3rem 0.18rem;
+    padding: 0.12rem 0.2rem 0.18rem;
   }
 
   body.zeitsprung .zs-gap {
@@ -850,14 +892,14 @@ body.zeitsprung .zs-flip-hint-icon {
 
 @media (orientation: landscape) and (max-height: 400px) {
   body.zeitsprung .zs-play {
-    --zs-bar: max(3rem, calc(var(--zs-chrome-hit) + 0.2rem));
+    --zs-bar: max(48px, calc(var(--zs-chrome-hit) + 4px));
     --zs-btn: 30px;
     --zs-btn-mini: 24px;
   }
 
   body.zeitsprung {
-    --zs-card-w: 5.05rem;
-    --zs-card-h: 6.2rem;
+    --zs-card-w: 80px;
+    --zs-card-h: calc(var(--zs-card-w) * var(--zs-card-ratio));
   }
 
   body.zeitsprung .zs-tl {
